@@ -1,1 +1,1 @@
-mod galois;
+pub mod galois;
