@@ -77,6 +77,17 @@ fn div_assign() {
 
 #[test]
 #[serial]
+fn get_range() {
+    let gf = setup();
+    let vals = gf.get_range(0..10);
+
+    for (i, v) in vals.enumerate() {
+        assert_eq!(gf.get(i.try_into().unwrap()), v);
+    }
+}
+
+#[test]
+#[serial]
 fn ops_in_parallel() {
     let gf = setup();
     let one = gf.one();

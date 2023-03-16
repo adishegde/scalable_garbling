@@ -3,13 +3,15 @@ use rand::distributions::{Distribution, Uniform};
 use rand::Rng;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 
+/// Galois field with fixed order.
 pub struct GF {
     width: u8,
     rand_dist: Uniform<u32>,
 }
 
 impl GF {
-    // Setup field with specified width by pre-computing necessary data.
+    /// Creates a Galois field of order `2^{width}`.
+    /// Width is required to be at most 30.
     pub fn new(width: u8) -> Result<GF, &'static str> {
         if width > 30 {
             return Err("Width is too large.");
@@ -27,7 +29,7 @@ impl GF {
         }
     }
 
-    // Get field element with value `value`.
+    /// Creates field element with canonical representation `value`.
     pub fn get(&self, value: u32) -> GFElement {
         GFElement {
             value,
@@ -35,7 +37,15 @@ impl GF {
         }
     }
 
-    // Get a random field element.
+    /// Transforms an iterator over values to iterator over corresponding field elements.
+    pub fn get_range<'a, I>(&'a self, iter: I) -> impl Iterator<Item=GFElement> + 'a
+    where
+        I: IntoIterator<Item = u32> + 'a,
+    {
+        iter.into_iter().map(|x| self.get(x))
+    }
+
+    /// Creates a random field element.
     pub fn rand<R: Rng>(&self, rng: &mut R) -> GFElement {
         GFElement {
             value: self.rand_dist.sample(rng),
@@ -43,22 +53,27 @@ impl GF {
         }
     }
 
+    /// Returns the multiplicative identity.
     pub fn one(&self) -> GFElement {
         self.get(1)
     }
 
+    /// Returns the additive identity.
     pub fn zero(&self) -> GFElement {
         self.get(0)
     }
 
+    /// Returns the order of the field.
     pub fn order(&self) -> u32 {
         2_u32.pow(self.width as u32)
     }
 }
 
-// Represents a Galois field element.
-// Serves as a thin wrapper around the C library.
-// The implemented operations assume that input field elements have the same width.
+/// Represents a Galois field element.
+///
+/// These are constructed using the respective galois field instances.
+/// The implemented operations assume that input field elements belong to the same field.
+/// The behaviour is undefined when inputs belong to different fields.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct GFElement {
     value: u32,
