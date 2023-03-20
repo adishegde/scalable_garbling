@@ -1,6 +1,6 @@
 pub mod galois;
 pub mod sharing;
-mod utils;
+pub mod utils;
 
 #[derive(Debug,PartialEq)]
 pub enum ProtoErrorKind {
