@@ -38,7 +38,7 @@ impl GF {
     }
 
     /// Transforms an iterator over values to iterator over corresponding field elements.
-    pub fn get_range<'a, I>(&'a self, iter: I) -> impl Iterator<Item=GFElement> + 'a
+    pub fn get_range<'a, I>(&'a self, iter: I) -> impl Iterator<Item = GFElement> + 'a
     where
         I: IntoIterator<Item = u32> + 'a,
     {
