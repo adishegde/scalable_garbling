@@ -1,5 +1,5 @@
 use rand::rngs::mock::StepRng;
-use scalable_mpc::galois::GF;
+use scalable_mpc::math::galois::GF;
 use scalable_mpc::sharing::PackedSharing;
 use scalable_mpc::ProtoErrorKind;
 use serial_test::serial;

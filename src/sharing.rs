@@ -1,7 +1,11 @@
-use super::galois::{GFElement, GF};
-use super::utils::{iprod, lagrange_coeffs};
-use super::ProtoErrorKind;
+use crate::math::galois::{GFElement, GF};
+use crate::math::lagrange_coeffs;
+use crate::utils::iprod;
+use crate::PartyID;
+use crate::ProtoErrorKind;
 use rand::Rng;
+
+type PackedShare = GFElement;
 
 /// Creating and manipulate packed shares for a particular corruption threshold and packing
 /// parameter.
@@ -95,7 +99,7 @@ impl PackedSharing {
     /// Returns an `n = 2t + 2l - 1` length vector corresponding to the shares of each party.
     ///
     /// If the number of secrets input is lesser than `l`, it pads the secrets to be of length `l`.
-    pub fn share<R: Rng>(&self, secrets: &[GFElement], gf: &GF, rng: &mut R) -> Vec<GFElement> {
+    pub fn share<R: Rng>(&self, secrets: &[GFElement], gf: &GF, rng: &mut R) -> Vec<PackedShare> {
         let nevals = self.t + self.l;
 
         let mut inp = Vec::with_capacity(nevals);
@@ -124,7 +128,7 @@ impl PackedSharing {
     }
 
     /// Returns a random `t + l - 1` degree sharing.
-    pub fn rand<R: Rng>(&self, gf: &GF, rng: &mut R) -> Vec<GFElement> {
+    pub fn rand<R: Rng>(&self, gf: &GF, rng: &mut R) -> Vec<PackedShare> {
         let n = self.num_parties();
 
         let mut inp = Vec::with_capacity(self.t + self.l);
@@ -147,7 +151,7 @@ impl PackedSharing {
     /// Returns a vector of length `l` corresponding to the secrets.
     ///
     /// `shares` should be of length `n` but this is not checked within the method.
-    pub fn semihon_recon(&self, shares: &[GFElement], gf: &GF) -> Vec<GFElement> {
+    pub fn semihon_recon(&self, shares: &[PackedShare], gf: &GF) -> Vec<GFElement> {
         let n = self.num_parties();
 
         self.recon_coeffs[..self.l]
@@ -159,7 +163,7 @@ impl PackedSharing {
     /// Reconstructs secrets from a `t + l - 1` degree sharing while ensuring that all input shares
     /// are consistent and lie on a polynoial of degree `t + l - 1`.
     /// Returns a vector of length `l` corresponding to the secrets.
-    pub fn recon(&self, shares: &[GFElement], gf: &GF) -> Result<Vec<GFElement>, ProtoErrorKind> {
+    pub fn recon(&self, shares: &[PackedShare], gf: &GF) -> Result<Vec<GFElement>, ProtoErrorKind> {
         let n = self.num_parties();
 
         if shares.len() != n {
@@ -185,7 +189,7 @@ impl PackedSharing {
     /// Returns an `n = 2t + 2l - 1` length vector corresponding to the shares of each party.
     ///
     /// If the number of secrets input is lesser than `l`, it pads the secrets to be of length `l`.
-    pub fn share_n<R: Rng>(&self, secrets: &[GFElement], gf: &GF, rng: &mut R) -> Vec<GFElement> {
+    pub fn share_n<R: Rng>(&self, secrets: &[GFElement], gf: &GF, rng: &mut R) -> Vec<PackedShare> {
         let nevals = self.num_parties();
 
         let mut inp = Vec::with_capacity(nevals);
@@ -214,7 +218,7 @@ impl PackedSharing {
     }
 
     /// Returns a random `n - 1 = 2t + 2l - 2` degree sharing.
-    pub fn rand_n<R: Rng>(&self, gf: &GF, rng: &mut R) -> Vec<GFElement> {
+    pub fn rand_n<R: Rng>(&self, gf: &GF, rng: &mut R) -> Vec<PackedShare> {
         (0..self.num_parties()).map(|_| gf.rand(rng)).collect()
     }
 
@@ -222,7 +226,7 @@ impl PackedSharing {
     /// Returns a vector of length `l` corresponding to the secrets.
     ///
     /// `shares` should be of length `n` but this is not checked within the method.
-    pub fn recon_n(&self, shares: &[GFElement], gf: &GF) -> Vec<GFElement> {
+    pub fn recon_n(&self, shares: &[PackedShare], gf: &GF) -> Vec<GFElement> {
         self.recon_coeffs_n
             .iter()
             .map(|c| iprod(c.iter(), shares.iter(), gf))
@@ -232,7 +236,7 @@ impl PackedSharing {
     /// Returns the i-th party's share for a `l-1` degree polynomial encoding of `l` secrets.
     ///
     /// `vals` should be of length `l` but this is not checked within the method.
-    pub fn const_to_share(&self, vals: &[GFElement], i: usize, gf: &GF) -> GFElement {
-        iprod(self.share_coeffs_l[i].iter(), vals.iter(), gf)
+    pub fn const_to_share(&self, vals: &[GFElement], i: PartyID, gf: &GF) -> PackedShare {
+        iprod(self.share_coeffs_l[usize::from(i)].iter(), vals.iter(), gf)
     }
 }
