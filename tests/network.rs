@@ -1,5 +1,5 @@
 use scalable_mpc::protocol::network;
-use scalable_mpc::{block_on, spawn};
+use scalable_mpc::{block_on, spawn, PartyID};
 use serial_test::serial;
 
 #[test]
@@ -8,20 +8,21 @@ fn net_local_two_party() {
         let data = b"hello world".to_vec();
         let proto_id = b"root protocol".to_vec();
 
-        let mut nets: Vec<_> = network::setup_local_network(2)
+        let mut comms: Vec<_> = network::setup_local_network(2)
             .await
             .into_iter()
-            .map(|net| Some(net))
+            .map(|val| Some(val))
             .collect();
-        let net1 = nets[0].take().unwrap();
-        let net2 = nets[1].take().unwrap();
+        let comms1 = comms[0].take().unwrap();
+        let comms2 = comms[1].take().unwrap();
 
         let party1 = {
             let proto_id = proto_id.clone();
             let data = data.clone();
 
             spawn(async move {
-                let chan = net1.channel(&proto_id).await;
+                let (stats, net) = comms1;
+                let chan = net.channel(&proto_id).await;
                 chan.send(network::SendMessage {
                     to: network::Recipient::One(1),
                     proto_id: proto_id.clone(),
@@ -35,15 +36,26 @@ fn net_local_two_party() {
                 assert_eq!(mssg.data, data);
 
                 chan.close();
+
+                let data_len = data.len() as u64;
+
+                assert_eq!(stats.party(1).await, (data_len, data_len));
+                assert_eq!(stats.party(0).await, (0, 0));
             })
         };
 
         let party2 = spawn(async move {
-            let chan = net2.channel(&proto_id).await;
+            let (stats, net) = comms2;
+            let chan = net.channel(&proto_id).await;
             let mssg = chan.recv().await;
             assert_eq!(mssg.from, 0);
             assert_eq!(mssg.proto_id, proto_id);
             assert_eq!(mssg.data, data);
+
+            let data_len = data.len() as u64;
+
+            assert_eq!(stats.party(0).await, (data_len, data_len));
+            assert_eq!(stats.party(1).await, (0, 0));
 
             chan.send(network::SendMessage {
                 to: network::Recipient::One(0),
@@ -53,6 +65,9 @@ fn net_local_two_party() {
             .await;
 
             chan.close();
+
+            assert_eq!(stats.party(0).await, (data_len, data_len));
+            assert_eq!(stats.party(1).await, (0, 0));
         });
 
         party1.await;
@@ -67,32 +82,46 @@ fn net_local_many_parties() {
         let data = b"hello world".to_vec();
         let proto_id = b"protocol id".to_vec();
 
-        let nets = network::setup_local_network(num).await;
+        let comms = network::setup_local_network(num).await;
         let mut handles = Vec::new();
-        for (pid, net) in nets.into_iter().enumerate() {
+        for (pid, (stats, net)) in comms.into_iter().enumerate() {
             let proto_id = proto_id.clone();
             let data = data.clone();
+            let pid: PartyID = pid.try_into().unwrap();
 
             handles.push(spawn(async move {
                 let chan = net.channel(&proto_id).await;
+                chan.send(network::SendMessage {
+                    to: network::Recipient::All,
+                    proto_id: proto_id.clone(),
+                    data: data.clone(),
+                })
+                .await;
 
-                for i in 0..num {
-                    if i == pid {
-                        chan.send(network::SendMessage {
-                            to: network::Recipient::All,
-                            proto_id: proto_id.clone(),
-                            data: data.clone(),
-                        })
-                        .await;
-                    }
+                let mut recv_ids = vec![false; num];
 
+                for _ in 0..num {
                     let mssg = chan.recv().await;
-                    assert_eq!(mssg.from, i.try_into().unwrap());
+                    recv_ids[mssg.from as usize] = true;
                     assert_eq!(mssg.proto_id, proto_id);
                     assert_eq!(mssg.data, data);
                 }
 
                 chan.close();
+
+                for b in recv_ids {
+                    assert!(b);
+                }
+
+                let data_len = data.len() as u64;
+
+                for i in 0..num.try_into().unwrap() {
+                    if i == pid {
+                        assert_eq!(stats.party(i).await, (0, 0));
+                    } else {
+                        assert_eq!(stats.party(i).await, (data_len, data_len));
+                    }
+                }
             }));
         }
 
@@ -119,7 +148,7 @@ fn net_tcp_two_party() {
             let addresses = addresses.clone();
 
             spawn(async move {
-                let net = network::setup_tcp_network(0, &addresses).await;
+                let (stats, net) = network::setup_tcp_network(0, &addresses).await;
                 let chan = net.channel(&proto_id).await;
                 chan.send(network::SendMessage {
                     to: network::Recipient::One(1),
@@ -134,16 +163,26 @@ fn net_tcp_two_party() {
                 assert_eq!(mssg.data, data);
 
                 chan.close();
+
+                let data_len = data.len() as u64;
+
+                assert_eq!(stats.party(1).await.0, data_len);
+                assert_eq!(stats.party(0).await, (0, 0));
             })
         };
 
         let party2 = spawn(async move {
-            let net = network::setup_tcp_network(1, &addresses).await;
+            let (stats, net) = network::setup_tcp_network(1, &addresses).await;
             let chan = net.channel(&proto_id).await;
             let mssg = chan.recv().await;
             assert_eq!(mssg.from, 0);
             assert_eq!(mssg.proto_id, proto_id);
             assert_eq!(mssg.data, data);
+
+            let data_len = data.len() as u64;
+
+            assert_eq!(stats.party(0).await.0, data_len);
+            assert_eq!(stats.party(1).await, (0, 0));
 
             chan.send(network::SendMessage {
                 to: network::Recipient::One(0),
@@ -153,6 +192,9 @@ fn net_tcp_two_party() {
             .await;
 
             chan.close();
+
+            assert_eq!(stats.party(0).await.0, data_len);
+            assert_eq!(stats.party(1).await, (0, 0));
         });
 
         party1.await;
@@ -178,26 +220,39 @@ fn net_tcp_many_parties() {
             let addresses = addresses.clone();
 
             handles.push(spawn(async move {
-                let net = network::setup_tcp_network(pid, &addresses).await;
+                let (stats, net) = network::setup_tcp_network(pid, &addresses).await;
                 let chan = net.channel(&proto_id).await;
+                chan.send(network::SendMessage {
+                    to: network::Recipient::All,
+                    proto_id: proto_id.clone(),
+                    data: data.clone(),
+                })
+                .await;
 
-                for i in 0..num {
-                    if i == pid {
-                        chan.send(network::SendMessage {
-                            to: network::Recipient::All,
-                            proto_id: proto_id.clone(),
-                            data: data.clone(),
-                        })
-                        .await;
-                    }
+                let mut recv_ids = vec![false; num as usize];
 
+                for _ in 0..num {
                     let mssg = chan.recv().await;
-                    assert_eq!(mssg.from, i.try_into().unwrap());
+                    recv_ids[mssg.from as usize] = true;
                     assert_eq!(mssg.proto_id, proto_id);
                     assert_eq!(mssg.data, data);
                 }
 
                 chan.close();
+
+                for b in recv_ids {
+                    assert!(b);
+                }
+
+                let data_len = data.len() as u64;
+
+                for i in 0..num.try_into().unwrap() {
+                    if i == pid {
+                        assert_eq!(stats.party(i).await, (0, 0));
+                    } else {
+                        assert_eq!(stats.party(i).await.0, data_len);
+                    }
+                }
             }));
         }
 

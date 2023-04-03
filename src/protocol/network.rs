@@ -2,9 +2,12 @@ use super::{ProtoChannelBuilder, ProtocolID};
 use crate::utils::spawn;
 use crate::PartyID;
 use smol;
+use smol::channel::{unbounded, Receiver};
 use smol::io::{AsyncReadExt, AsyncWriteExt};
+use smol::lock::RwLock;
 use smol::net::{TcpListener, TcpStream};
 use smol::stream::StreamExt;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone, Copy)]
@@ -27,6 +30,158 @@ pub struct ReceivedMessage {
     pub data: Vec<u8>,
 }
 
+#[derive(Clone)]
+pub struct Stats(Vec<Arc<RwLock<(u64, u64)>>>);
+
+impl Stats {
+    fn new(num: usize) -> Self {
+        Stats((0..num).map(|_| Arc::new(RwLock::new((0, 0)))).collect())
+    }
+
+    async fn increment(&self, from: PartyID, proto_bytes: u64, net_bytes: u64) {
+        let mut val = self.0[from as usize].write().await;
+        val.0 += proto_bytes;
+        val.1 += net_bytes;
+    }
+
+    pub async fn party(&self, from: PartyID) -> (u64, u64) {
+        *self.0[from as usize].read().await
+    }
+
+    pub async fn total(&self) -> (u64, u64) {
+        let mut proto_bytes = 0;
+        let mut net_bytes = 0;
+
+        for v in &self.0 {
+            let val = v.read().await;
+            proto_bytes += val.0;
+            net_bytes += val.1;
+        }
+
+        (proto_bytes, net_bytes)
+    }
+}
+
+pub async fn setup_tcp_network(
+    party_id: PartyID,
+    addresses: &[String],
+) -> (Stats, ProtoChannelBuilder<SendMessage, ReceivedMessage>) {
+    let num_parties: PartyID = addresses
+        .len()
+        .try_into()
+        .expect("Number of parties to be at most 16 bytes long.");
+    let mut tcp_streams = connect_to_peers(party_id, &addresses).await;
+
+    // For a message being sent to the i-th party, the flow is as follows:
+    //   msg -> net_inp (using channel)
+    //   net_inp -> tcp_stream[i] (router task)
+    //   tcp_stream[sender] -> proto_channel (per party receiver task)
+    //   proto_channel -> mssg (using channel).
+    let (net_inp_s, net_inp_r) = unbounded::<SendMessage>();
+    let channel_builder = ProtoChannelBuilder::new(net_inp_s);
+    let stats = Stats::new(num_parties as usize);
+
+    // net_inp -> tcp_stream[i].
+    spawn(send_router(
+        party_id,
+        net_inp_r,
+        tcp_streams.clone(),
+        channel_builder.clone(),
+    ))
+    .detach();
+
+    // Start receiver task for each party.
+    for pid in 0..num_parties {
+        if let Some(stream) = tcp_streams[usize::from(pid)].take() {
+            // tcp_stream[pid] -> proto_channel.
+            spawn(party_receive_router(
+                pid,
+                stream,
+                channel_builder.clone(),
+                stats.clone(),
+            ))
+            .detach();
+        } else if pid != party_id {
+            panic!("All parties did not connect.");
+        }
+    }
+
+    (stats, channel_builder)
+}
+
+pub async fn setup_local_network(
+    num: usize,
+) -> Vec<(Stats, ProtoChannelBuilder<SendMessage, ReceivedMessage>)> {
+    let mut stats = Vec::with_capacity(num);
+    let mut net_builders = Vec::with_capacity(num);
+    let mut router_r = Vec::with_capacity(num);
+
+    for _ in 0..num {
+        let (s, r) = unbounded::<SendMessage>();
+        router_r.push(r);
+        net_builders.push(ProtoChannelBuilder::new(s));
+        stats.push(Stats::new(num));
+    }
+
+    for pid in 0..num {
+        let net_builders = net_builders.clone();
+        let mut party_router_r = router_r[pid].clone();
+        let stats = stats.clone();
+        let pid: PartyID = pid.try_into().unwrap();
+
+        spawn(async move {
+            while let Some(mssg) = party_router_r.next().await {
+                let data_len = mssg.data.len();
+
+                match mssg.to {
+                    Recipient::One(rid) => {
+                        let sender = net_builders[rid as usize]
+                            .receiver_handle(&mssg.proto_id)
+                            .await;
+                        sender
+                            .send(ReceivedMessage {
+                                from: pid,
+                                proto_id: mssg.proto_id,
+                                data: mssg.data,
+                            })
+                            .await
+                            .expect("Protocol channel sender is open.");
+
+                        if rid != pid {
+                            stats[rid as usize]
+                                .increment(pid, data_len as u64, data_len as u64)
+                                .await;
+                        }
+                    }
+                    Recipient::All => {
+                        for rid in 0..num {
+                            let sender = net_builders[rid].receiver_handle(&mssg.proto_id).await;
+                            sender
+                                .send(ReceivedMessage {
+                                    from: pid.try_into().unwrap(),
+                                    proto_id: mssg.proto_id.clone(),
+                                    data: mssg.data.clone(),
+                                })
+                                .await
+                                .expect("Protocol channel sender is open.");
+
+                            if rid != pid as usize {
+                                stats[rid]
+                                    .increment(pid, data_len as u64, data_len as u64)
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    stats.into_iter().zip(net_builders.into_iter()).collect()
+}
+
+// Establish TCP connection with every peer.
 async fn connect_to_peers(party_id: PartyID, addresses: &[String]) -> Vec<Option<TcpStream>> {
     const NUM_RETRIES: usize = 10;
     const SEC_BETWEEN_RETRIES: u64 = 1;
@@ -105,210 +260,134 @@ async fn connect_to_peers(party_id: PartyID, addresses: &[String]) -> Vec<Option
     .await
 }
 
-pub async fn setup_tcp_network(
+// Send messages to each party over the appropriate TCP socket.
+async fn send_router(
     party_id: PartyID,
-    addresses: &[String],
-) -> ProtoChannelBuilder<SendMessage, ReceivedMessage> {
-    let num_parties: PartyID = addresses
-        .len()
-        .try_into()
-        .expect("Number of parties to be at most 16 bytes long.");
-    let mut tcp_streams = connect_to_peers(party_id, &addresses).await;
-
-    // For a message being sent to the i-th party, the flow is as follows:
-    //   msg -> net_inp (using network struct)
-    //   net_inp -> party_router[i] (router task)
-    //   party_router[i] -> tcp_stream[i] (per party sender task)
-    //   tcp_stream[sender] -> proto_channel (per party receiver task)
-    //   proto_channel -> mssg (using network struct).
-    let (net_inp_s, mut net_inp_r) = smol::channel::unbounded::<SendMessage>();
-    let mut party_router_s = Vec::with_capacity(addresses.len());
-    let net_channel_builder = ProtoChannelBuilder::new(net_inp_s);
-
-    // Start sender and listener tasks for each party.
-    for pid in 0..num_parties {
-        if pid == party_id {
-            party_router_s.push(None);
-        } else if let Some(mut stream) = tcp_streams[usize::from(pid)].take() {
-            let mut send_stream = stream.clone();
-
-            let (router_s, mut router_r) = smol::channel::unbounded::<SendMessage>();
-            party_router_s.push(Some(router_s));
-
-            // party_router[pid] -> tcp_stream[pid].
-            spawn(async move {
-                while let Some(mssg) = router_r.next().await {
-                    let data_len: u8 = (mssg.proto_id.len() + mssg.data.len() + 1)
-                        .try_into()
-                        .expect("Message length to be at most 255 bytes.");
-                    let id_len: u8 = mssg
-                        .proto_id
-                        .len()
-                        .try_into()
-                        .expect("Protocol ID to be at most 255 bytes.");
-
-                    let mut data = Vec::with_capacity(usize::from(data_len) + 1);
-                    data.push(data_len);
-                    data.push(id_len);
-                    data.extend_from_slice(&mssg.proto_id);
-                    data.extend_from_slice(&mssg.data);
-
-                    send_stream
-                        .write_all(&data)
-                        .await
-                        .expect("TCP stream is writable.");
-                    send_stream.flush().await.expect("TCP stream is flushable.");
-                }
-            })
-            .detach();
-
-            let channel_builder = net_channel_builder.clone();
-
-            // tcp_stream[i] -> proto_channel.
-            spawn(async move {
-                let mut byte = [0; 1];
-
-                while let Ok(_) = stream.read_exact(&mut byte).await {
-                    let data_len = u8::from_be_bytes(byte);
-                    let mut payload = vec![0; usize::from(data_len)];
-                    stream
-                        .read_exact(&mut payload)
-                        .await
-                        .expect("TCP stream is readable.");
-
-                    let id_len = usize::from(payload[0]);
-                    let proto_id = payload[1..(id_len + 1)].to_vec();
-                    let data = payload[(id_len + 1)..].to_vec();
-                    let mssg = ReceivedMessage {
-                        from: pid,
-                        proto_id,
-                        data,
-                    };
-
+    mut incoming: Receiver<SendMessage>,
+    tcp_streams: Vec<Option<TcpStream>>,
+    channel_builder: ProtoChannelBuilder<SendMessage, ReceivedMessage>,
+) {
+    while let Some(mssg) = incoming.next().await {
+        match mssg.to {
+            Recipient::One(rid) => {
+                if rid == party_id {
                     let sender = channel_builder.receiver_handle(&mssg.proto_id).await;
-
-                    if let Err(_) = sender.send(mssg).await {
-                        break;
-                    }
+                    sender
+                        .send(ReceivedMessage {
+                            from: party_id,
+                            proto_id: mssg.proto_id,
+                            data: mssg.data,
+                        })
+                        .await
+                        .expect("Protocol channel sender is open.");
+                } else {
+                    send_to_party(
+                        &mssg.proto_id,
+                        &mssg.data,
+                        tcp_streams[usize::from(rid)].as_ref().unwrap().clone(),
+                    )
+                    .await;
                 }
-            })
-            .detach();
-        } else {
-            panic!("All parties did not connect.");
-        }
-    }
+            }
+            Recipient::All => {
+                let mut tasks = Vec::with_capacity(tcp_streams.len());
+                let proto_id = Arc::new(mssg.proto_id);
+                let data = Arc::new(mssg.data);
 
-    // net_inp -> party_router[i].
-    let channel_builder = net_channel_builder.clone();
-    spawn(async move {
-        while let Some(mssg) = net_inp_r.next().await {
-            match mssg.to {
-                Recipient::One(rid) => {
-                    if rid == party_id {
-                        let sender = channel_builder.receiver_handle(&mssg.proto_id).await;
-                        sender
-                            .send(ReceivedMessage {
-                                from: party_id,
-                                proto_id: mssg.proto_id,
-                                data: mssg.data,
-                            })
-                            .await
-                            .expect("Protocol channel sender is open.");
-                    } else {
-                        party_router_s[usize::from(rid)]
-                            .as_ref()
-                            .unwrap()
-                            .send(mssg)
-                            .await
-                            .expect("Party router sender is open.");
-                    }
-                }
-                Recipient::All => {
-                    for i in 0..num_parties {
-                        if i == party_id {
-                            let sender = channel_builder.receiver_handle(&mssg.proto_id).await;
+                for rid in 0..tcp_streams.len() {
+                    let proto_id = proto_id.clone();
+                    let data = data.clone();
+
+                    if rid as PartyID == party_id {
+                        let channel_builder = channel_builder.clone();
+                        tasks.push(spawn(async move {
+                            let sender = channel_builder.receiver_handle(&proto_id).await;
                             sender
                                 .send(ReceivedMessage {
                                     from: party_id,
-                                    proto_id: mssg.proto_id.clone(),
-                                    data: mssg.data.clone(),
+                                    proto_id: proto_id.to_vec(),
+                                    data: data.to_vec(),
                                 })
                                 .await
                                 .expect("Protocol channel sender is open.");
-                        } else {
-                            party_router_s[usize::from(i)]
-                                .as_ref()
-                                .unwrap()
-                                .send(mssg.clone())
-                                .await
-                                .expect("Party router sender is open.");
-                        }
+                        }));
+                    } else {
+                        let stream = tcp_streams[usize::from(rid)].as_ref().unwrap().clone();
+                        tasks.push(spawn(async move {
+                            send_to_party(proto_id.as_ref(), data.as_ref(), stream).await;
+                        }));
                     }
                 }
+
+                // Wait for all sends to complete.
+                spawn(async move {
+                    for task in tasks {
+                        task.await;
+                    }
+                })
+                .await;
             }
         }
-
-        for s in party_router_s {
-            if let Some(stream) = s {
-                stream.close();
-            }
-        }
-    })
-    .detach();
-
-    net_channel_builder
+    }
 }
 
-pub async fn setup_local_network(
-    num: usize,
-) -> Vec<ProtoChannelBuilder<SendMessage, ReceivedMessage>> {
-    let mut net_builders = Vec::with_capacity(num);
-    let mut router_r = Vec::with_capacity(num);
+// Send data over stream for protocol with ID proto_id.
+async fn send_to_party(proto_id: &ProtocolID, data: &[u8], mut stream: TcpStream) {
+    let mssg_len: u8 = (proto_id.len() + data.len() + 1)
+        .try_into()
+        .expect("Message length to be at most 255 bytes.");
+    let id_len: u8 = proto_id
+        .len()
+        .try_into()
+        .expect("Protocol ID to be at most 255 bytes.");
 
-    for _ in 0..num {
-        let (s, r) = smol::channel::unbounded::<SendMessage>();
-        router_r.push(r);
-        net_builders.push(ProtoChannelBuilder::new(s));
+    let mut mssg = Vec::with_capacity(usize::from(mssg_len) + 1);
+    mssg.push(mssg_len);
+    mssg.push(id_len);
+    mssg.extend_from_slice(&proto_id);
+    mssg.extend_from_slice(&data);
+
+    stream
+        .write_all(&mssg)
+        .await
+        .expect("TCP stream is writable.");
+    stream.flush().await.expect("TCP stream is flushable.");
+}
+
+// Receive messages sent over the TCP socket and send them to the appropriate protocol.
+async fn party_receive_router(
+    pid: PartyID,
+    mut incoming: TcpStream,
+    channel_builder: ProtoChannelBuilder<SendMessage, ReceivedMessage>,
+    stats: Stats,
+) {
+    let mut byte = [0; 1];
+
+    while let Ok(_) = incoming.read_exact(&mut byte).await {
+        let mssg_len = usize::from(u8::from_be_bytes(byte));
+        let mut mssg = vec![0; mssg_len];
+        incoming
+            .read_exact(&mut mssg)
+            .await
+            .expect("TCP stream is readable.");
+
+        let id_len = usize::from(mssg[0]);
+        let proto_id = mssg[1..(id_len + 1)].to_vec();
+        let data = mssg[(id_len + 1)..].to_vec();
+        let recv_mssg = ReceivedMessage {
+            from: pid,
+            proto_id,
+            data,
+        };
+
+        let sender = channel_builder.receiver_handle(&recv_mssg.proto_id).await;
+
+        if let Err(_) = sender.send(recv_mssg).await {
+            break;
+        }
+
+        stats
+            .increment(pid, (mssg_len - id_len - 1) as u64, (mssg_len + 1) as u64)
+            .await;
     }
-
-    for pid in 0..num {
-        let net_builders = net_builders.clone();
-        let mut party_router_r = router_r[pid].clone();
-
-        spawn(async move {
-            while let Some(mssg) = party_router_r.next().await {
-                match mssg.to {
-                    Recipient::One(rid) => {
-                        let sender = net_builders[usize::from(rid)]
-                            .receiver_handle(&mssg.proto_id)
-                            .await;
-                        sender
-                            .send(ReceivedMessage {
-                                from: pid.try_into().unwrap(),
-                                proto_id: mssg.proto_id,
-                                data: mssg.data,
-                            })
-                            .await
-                            .expect("Protocol channel sender is open.");
-                    }
-                    Recipient::All => {
-                        for rid in 0..num {
-                            let sender = net_builders[rid].receiver_handle(&mssg.proto_id).await;
-                            sender
-                                .send(ReceivedMessage {
-                                    from: pid.try_into().unwrap(),
-                                    proto_id: mssg.proto_id.clone(),
-                                    data: mssg.data.clone(),
-                                })
-                                .await
-                                .expect("Protocol channel sender is open.");
-                        }
-                    }
-                }
-            }
-        })
-        .detach();
-    }
-
-    net_builders
 }

@@ -1,5 +1,5 @@
 use smol::channel::{unbounded, Receiver, Sender};
-use smol::lock::Mutex;
+use smol::lock::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -93,56 +93,61 @@ impl<S, R> ProtoChannel<S, R> {
 
 pub struct ProtoChannelBuilder<S, R> {
     worker_s: Sender<S>,
-    receiver_s: Arc<Mutex<HashMap<ProtocolID, Sender<R>>>>,
-    receiver_r: Arc<Mutex<HashMap<ProtocolID, Receiver<R>>>>,
+    receiver_s: Arc<RwLock<HashMap<ProtocolID, Sender<R>>>>,
+    receiver_r: Arc<RwLock<HashMap<ProtocolID, Receiver<R>>>>,
 }
 
 impl<S, R> ProtoChannelBuilder<S, R> {
     fn new(worker_task_s: Sender<S>) -> Self {
         Self {
             worker_s: worker_task_s,
-            receiver_s: Arc::new(Mutex::new(HashMap::new())),
-            receiver_r: Arc::new(Mutex::new(HashMap::new())),
+            receiver_s: Arc::new(RwLock::new(HashMap::new())),
+            receiver_r: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
+    async fn create_channel(&self, id: ProtocolID) -> (Sender<R>, Receiver<R>) {
+        let (sender, receiver) = unbounded();
+
+        {
+            let mut sender_map = self.receiver_s.write().await;
+            sender_map.insert(id.clone(), sender.clone());
+        }
+
+        {
+            let mut receiver_map = self.receiver_r.write().await;
+            receiver_map.insert(id, receiver.clone());
+        }
+
+        (sender, receiver)
+    }
+
     pub async fn channel(&self, id: &ProtocolID) -> ProtoChannel<S, R> {
-        let receiver_exists = {
-            let mut receiver_map = self.receiver_r.lock().await;
-            receiver_map.remove(id)
-        };
-
-        match receiver_exists {
-            Some(receiver) => ProtoChannel {
+        let receiver_map = self.receiver_r.read().await;
+        if let Some(receiver) = receiver_map.get(id) {
+            return ProtoChannel {
                 sender: self.worker_s.clone(),
-                receiver,
-            },
-            None => {
-                let (sender, receiver) = unbounded();
-                let mut sender_map = self.receiver_s.lock().await;
-                sender_map.insert(id.to_vec(), sender);
+                receiver: receiver.clone(),
+            };
+        }
+        std::mem::drop(receiver_map);
 
-                ProtoChannel {
-                    sender: self.worker_s.clone(),
-                    receiver,
-                }
-            }
+        let (_, receiver) = self.create_channel(id.clone()).await;
+
+        ProtoChannel {
+            sender: self.worker_s.clone(),
+            receiver,
         }
     }
 
     async fn receiver_handle(&self, id: &ProtocolID) -> Sender<R> {
-        let mut sender_map = self.receiver_s.lock().await;
+        let sender_map = self.receiver_s.read().await;
         if let Some(sender) = sender_map.get(id) {
             return sender.clone();
         }
-
-        let (sender, receiver) = unbounded();
-        sender_map.insert(id.to_vec(), sender.clone());
         std::mem::drop(sender_map);
 
-        let mut receiver_map = self.receiver_r.lock().await;
-        receiver_map.insert(id.to_vec(), receiver);
-
+        let (sender, _) = self.create_channel(id.clone()).await;
         sender
     }
 }
