@@ -21,3 +21,7 @@ where
 {
     async_global_executor::spawn(future)
 }
+
+pub fn block_on<F: Future<Output = T>, T>(future: F) -> T {
+    async_global_executor::block_on(future)
+}
