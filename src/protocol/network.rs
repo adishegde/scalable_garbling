@@ -62,10 +62,12 @@ impl Stats {
     }
 }
 
+type NetworkChannelBuilder = ProtoChannelBuilder<SendMessage, ReceivedMessage>;
+
 pub async fn setup_tcp_network(
     party_id: PartyID,
     addresses: &[String],
-) -> (Stats, ProtoChannelBuilder<SendMessage, ReceivedMessage>) {
+) -> (Stats, NetworkChannelBuilder) {
     let num_parties: PartyID = addresses
         .len()
         .try_into()
@@ -109,9 +111,7 @@ pub async fn setup_tcp_network(
     (stats, channel_builder)
 }
 
-pub async fn setup_local_network(
-    num: usize,
-) -> Vec<(Stats, ProtoChannelBuilder<SendMessage, ReceivedMessage>)> {
+pub async fn setup_local_network(num: usize) -> Vec<(Stats, NetworkChannelBuilder)> {
     let mut stats = Vec::with_capacity(num);
     let mut net_builders = Vec::with_capacity(num);
     let mut router_r = Vec::with_capacity(num);
@@ -135,6 +135,12 @@ pub async fn setup_local_network(
 
                 match mssg.to {
                     Recipient::One(rid) => {
+                        if rid != pid {
+                            stats[rid as usize]
+                                .increment(pid, data_len as u64, data_len as u64)
+                                .await;
+                        }
+
                         let sender = net_builders[rid as usize]
                             .receiver_handle(&mssg.proto_id)
                             .await;
@@ -146,15 +152,15 @@ pub async fn setup_local_network(
                             })
                             .await
                             .expect("Protocol channel sender is open.");
-
-                        if rid != pid {
-                            stats[rid as usize]
-                                .increment(pid, data_len as u64, data_len as u64)
-                                .await;
-                        }
                     }
                     Recipient::All => {
                         for rid in 0..num {
+                            if rid != pid as usize {
+                                stats[rid]
+                                    .increment(pid, data_len as u64, data_len as u64)
+                                    .await;
+                            }
+
                             let sender = net_builders[rid].receiver_handle(&mssg.proto_id).await;
                             sender
                                 .send(ReceivedMessage {
@@ -164,12 +170,6 @@ pub async fn setup_local_network(
                                 })
                                 .await
                                 .expect("Protocol channel sender is open.");
-
-                            if rid != pid as usize {
-                                stats[rid]
-                                    .increment(pid, data_len as u64, data_len as u64)
-                                    .await;
-                            }
                         }
                     }
                 }
@@ -265,7 +265,7 @@ async fn send_router(
     party_id: PartyID,
     mut incoming: Receiver<SendMessage>,
     tcp_streams: Vec<Option<TcpStream>>,
-    channel_builder: ProtoChannelBuilder<SendMessage, ReceivedMessage>,
+    channel_builder: NetworkChannelBuilder,
 ) {
     while let Some(mssg) = incoming.next().await {
         match mssg.to {
@@ -358,7 +358,7 @@ async fn send_to_party(proto_id: &ProtocolID, data: &[u8], mut stream: TcpStream
 async fn party_receive_router(
     pid: PartyID,
     mut incoming: TcpStream,
-    channel_builder: ProtoChannelBuilder<SendMessage, ReceivedMessage>,
+    channel_builder: NetworkChannelBuilder,
     stats: Stats,
 ) {
     let mut byte = [0; 1];
