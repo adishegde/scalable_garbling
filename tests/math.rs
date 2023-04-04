@@ -115,6 +115,18 @@ fn ops_in_parallel() {
 
 #[test]
 #[serial]
+fn serialize_and_deserialize() {
+    let gf = setup();
+    let a = gf.get(53);
+    let bytes = gf.serialize_element(&a);
+    let b = gf.deserialize_element(&bytes);
+
+    assert_eq!(bytes.len(), 3);
+    assert_eq!(a, b);
+}
+
+#[test]
+#[serial]
 fn lagrange_coeffs_on_same_evaluations() {
     let gf = setup();
 

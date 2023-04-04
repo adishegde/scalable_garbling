@@ -1,10 +1,12 @@
+use crate::math::galois::GF;
+use crate::sharing::PackedSharing;
 use smol::channel::{unbounded, Receiver, Sender};
 use smol::lock::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod network;
-// pub mod rand;
+pub mod rand;
 
 /// Unique identifier for a protocol.
 pub type ProtocolID = Vec<u8>;
@@ -85,6 +87,10 @@ impl<S, R> ProtoChannel<S, R> {
             .await
             .expect("Channel receiver to be open.")
     }
+
+    pub fn receiver(&self) -> Receiver<R> {
+        self.receiver.clone()
+    }
 }
 
 pub struct ProtoChannelBuilder<S, R> {
@@ -151,4 +157,13 @@ impl<S, R> Clone for ProtoChannelBuilder<S, R> {
             clients: self.clients.clone(),
         }
     }
+}
+
+pub struct MPCContext {
+    num: usize,
+    t: usize,
+    l: usize,
+    gf: Arc<GF>,
+    sharing: Arc<PackedSharing>,
+    net_builder: network::NetworkChannelBuilder,
 }

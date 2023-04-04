@@ -48,3 +48,24 @@ pub fn lagrange_coeffs(cpos: &[GFElement], npos: &[GFElement], gf: &GF) -> Vec<V
 
     all_coeffs
 }
+
+pub fn super_inv_matrix(num_inp: usize, num_out: usize, gf: &GF) -> Vec<Vec<GFElement>> {
+    let mut matrix = Vec::with_capacity(num_out);
+    matrix.push(vec![gf.one(); num_inp]);
+
+    for i in 2..(num_out + 1) {
+        let val = gf.get(i.try_into().unwrap());
+        let mut row = Vec::with_capacity(num_inp);
+        row.push(gf.one());
+        let mut prev = gf.one();
+
+        for _ in 1..num_inp {
+            prev *= val;
+            row.push(prev);
+        }
+
+        matrix.push(row);
+    }
+
+    matrix
+}

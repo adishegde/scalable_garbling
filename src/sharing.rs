@@ -5,7 +5,7 @@ use crate::PartyID;
 use crate::ProtoErrorKind;
 use rand::Rng;
 
-type PackedShare = GFElement;
+pub type PackedShare = GFElement;
 
 /// Creating and manipulate packed shares for a particular corruption threshold and packing
 /// parameter.

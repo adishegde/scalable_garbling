@@ -6,6 +6,7 @@ use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 /// Galois field with fixed order.
 pub struct GF {
     width: u8,
+    num_bytes: usize,
     rand_dist: Uniform<u32>,
 }
 
@@ -18,12 +19,14 @@ impl GF {
         }
 
         let ret = unsafe { bindings::galois_create_log_tables(width.into()) };
+        let num_bytes = (width as f64 / 8.0).ceil() as usize;
 
         if ret != 0 {
             Err("Could not create log tables.")
         } else {
             Ok(GF {
                 width,
+                num_bytes,
                 rand_dist: Uniform::new(0, 2_u32.pow(width.into())),
             })
         }
@@ -66,6 +69,24 @@ impl GF {
     /// Returns the order of the field.
     pub fn order(&self) -> u32 {
         2_u32.pow(self.width as u32)
+    }
+
+    /// Serialize a field element.
+    pub fn serialize_element(&self, element: &GFElement) -> Vec<u8> {
+        element.value.to_le_bytes()[..self.num_bytes].to_vec()
+    }
+
+    /// Deserialize a field element.
+    pub fn deserialize_element(&self, bytes: &[u8]) -> GFElement {
+        let mut be_bytes = [0, 0, 0, 0];
+        for i in 0..bytes.len() {
+            be_bytes[i] = bytes[i];
+        }
+
+        GFElement {
+            value: u32::from_le_bytes(be_bytes),
+            width: self.width,
+        }
     }
 }
 

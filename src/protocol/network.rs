@@ -62,7 +62,7 @@ impl Stats {
     }
 }
 
-type NetworkChannelBuilder = ProtoChannelBuilder<SendMessage, ReceivedMessage>;
+pub type NetworkChannelBuilder = ProtoChannelBuilder<SendMessage, ReceivedMessage>;
 
 pub async fn setup_tcp_network(
     party_id: PartyID,
@@ -179,6 +179,30 @@ pub async fn setup_local_network(num: usize) -> Vec<(Stats, NetworkChannelBuilde
     }
 
     stats.into_iter().zip(net_builders.into_iter()).collect()
+}
+
+/// Waits to receive a message from each party and then returns the list of messages in order of
+/// the party ID.
+/// If multiple messages are received from the same party, the first one is returned and the latter
+/// ones are dropped.
+pub async fn message_from_each_party(
+    receiver: Receiver<ReceivedMessage>,
+    num: usize,
+) -> Vec<Vec<u8>> {
+    let mut mssgs = vec![Vec::new(); num];
+    let mut has_sent = vec![false; num];
+    let mut counter = 0;
+
+    while counter != num {
+        let mssg = receiver.recv().await.unwrap();
+        if !has_sent[mssg.from as usize] {
+            mssgs[mssg.from as usize] = mssg.data;
+            counter += 1;
+            has_sent[mssg.from as usize] = true;
+        }
+    }
+
+    mssgs
 }
 
 // Establish TCP connection with every peer.
