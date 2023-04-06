@@ -160,7 +160,7 @@ impl<S, R> Clone for ProtoChannelBuilder<S, R> {
 }
 
 pub struct MPCContext {
-    num: usize,
+    n: usize,
     t: usize,
     l: usize,
     gf: Arc<GF>,

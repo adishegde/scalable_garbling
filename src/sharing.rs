@@ -14,6 +14,8 @@ pub struct PackedSharing {
     t: usize,
     // Packing parameter.
     l: usize,
+    // Number of parties/shares. n >= 2t + 2l - 1.
+    n: usize,
     // Coefficients to compute `t + l - 1` degree sharings from secrets.
     // Dimensions: `n - t` vectors each of length `t + l`.
     share_coeffs: Vec<Vec<GFElement>>,
@@ -21,7 +23,7 @@ pub struct PackedSharing {
     // Dimensions: `n - t` vectors each of length `t + l`.
     recon_coeffs: Vec<Vec<GFElement>>,
     // Coefficients to compute a random `t + l - 1` degree sharing.
-    // Dimensions: `t + l - 1` vectors each of length `t + l`.
+    // Dimensions: `n - t - l` vectors each of length `t + l`.
     rand_coeffs: Vec<Vec<GFElement>>,
     // Coefficients to compute shares over `n-1` degree polynomials.
     // Dimensions: `l` vectors each of length `n`.
@@ -36,9 +38,7 @@ pub struct PackedSharing {
 
 impl PackedSharing {
     /// Creates a new packed sharing instance with a fixed threshold `t` and packing parameter `l`.
-    pub fn new(t: u32, l: u32, gf: &GF) -> Self {
-        let n = 2 * t + 2 * l - 1;
-
+    pub fn new(n: u32, t: u32, l: u32, gf: &GF) -> Self {
         // Secrets correspond to evaluations at `[0, ..., l - 1]`.
         // Shares correspond to evaluations at `[l, ..., l + n - 1]`.
         // The sharing polynomial is defined by `[0, ..., l + t - 1]` which allows setting the
@@ -82,6 +82,7 @@ impl PackedSharing {
         PackedSharing {
             t: t as usize,
             l: l as usize,
+            n: n as usize,
             share_coeffs,
             recon_coeffs,
             rand_coeffs,
@@ -91,19 +92,15 @@ impl PackedSharing {
         }
     }
 
-    fn num_parties(&self) -> usize {
-        2 * self.t + 2 * self.l - 1
-    }
-
     /// Secret shares over a `t + l - 1` degree polynomial.
-    /// Returns an `n = 2t + 2l - 1` length vector corresponding to the shares of each party.
+    /// Returns an `n` length vector corresponding to the share of each party.
     ///
     /// If the number of secrets input is lesser than `l`, it pads the secrets to be of length `l`.
     pub fn share<R: Rng>(&self, secrets: &[GFElement], gf: &GF, rng: &mut R) -> Vec<PackedShare> {
         let nevals = self.t + self.l;
 
         let mut inp = Vec::with_capacity(nevals);
-        let mut shares = Vec::with_capacity(self.num_parties());
+        let mut shares = Vec::with_capacity(self.n);
 
         // Only take up to first `l` secrets.
         for &x in secrets.iter().take(self.l) {
@@ -129,10 +126,8 @@ impl PackedSharing {
 
     /// Returns a random `t + l - 1` degree sharing.
     pub fn rand<R: Rng>(&self, gf: &GF, rng: &mut R) -> Vec<PackedShare> {
-        let n = self.num_parties();
-
         let mut inp = Vec::with_capacity(self.t + self.l);
-        let mut shares = Vec::with_capacity(n);
+        let mut shares = Vec::with_capacity(self.n);
 
         inp.extend((0..(self.t + self.l)).map(|_| gf.rand(rng)));
 
@@ -152,11 +147,9 @@ impl PackedSharing {
     ///
     /// `shares` should be of length `n` but this is not checked within the method.
     pub fn semihon_recon(&self, shares: &[PackedShare], gf: &GF) -> Vec<GFElement> {
-        let n = self.num_parties();
-
         self.recon_coeffs[..self.l]
             .iter()
-            .map(|c| iprod(c.iter(), shares[(n - self.t - self.l)..].iter(), gf))
+            .map(|c| iprod(c.iter(), shares[(self.n - self.t - self.l)..].iter(), gf))
             .collect()
     }
 
@@ -164,16 +157,14 @@ impl PackedSharing {
     /// are consistent and lie on a polynoial of degree `t + l - 1`.
     /// Returns a vector of length `l` corresponding to the secrets.
     pub fn recon(&self, shares: &[PackedShare], gf: &GF) -> Result<Vec<GFElement>, ProtoErrorKind> {
-        let n = self.num_parties();
-
-        if shares.len() != n {
+        if shares.len() != self.n {
             return Err(ProtoErrorKind::Other("Expected one share from each party."));
         }
 
         let recon_vals: Vec<_> = self
             .recon_coeffs
             .iter()
-            .map(|c| iprod(c.iter(), shares[(n - self.t - self.l)..].iter(), gf))
+            .map(|c| iprod(c.iter(), shares[(self.n - self.t - self.l)..].iter(), gf))
             .collect();
 
         for (i, &v) in recon_vals[self.l..].iter().enumerate() {
@@ -190,10 +181,8 @@ impl PackedSharing {
     ///
     /// If the number of secrets input is lesser than `l`, it pads the secrets to be of length `l`.
     pub fn share_n<R: Rng>(&self, secrets: &[GFElement], gf: &GF, rng: &mut R) -> Vec<PackedShare> {
-        let nevals = self.num_parties();
-
-        let mut inp = Vec::with_capacity(nevals);
-        let mut shares = Vec::with_capacity(self.num_parties());
+        let mut inp = Vec::with_capacity(self.n);
+        let mut shares = Vec::with_capacity(self.n);
 
         // Only take up to first `l` secrets.
         for &x in secrets.iter().take(self.l) {
@@ -203,7 +192,7 @@ impl PackedSharing {
         // Remaining inputs are random.
         // This loop pads the input with random values to ensure there are `l` secrets as well as
         // samples random shares for the first `2t + l - 1` parties.
-        while inp.len() < nevals {
+        while inp.len() < self.n {
             inp.push(gf.rand(rng));
         }
 
@@ -219,7 +208,7 @@ impl PackedSharing {
 
     /// Returns a random `n - 1 = 2t + 2l - 2` degree sharing.
     pub fn rand_n<R: Rng>(&self, gf: &GF, rng: &mut R) -> Vec<PackedShare> {
-        (0..self.num_parties()).map(|_| gf.rand(rng)).collect()
+        (0..self.n).map(|_| gf.rand(rng)).collect()
     }
 
     /// Reconstructs secrets from a `n-1` degree sharing.

@@ -15,13 +15,13 @@ fn setup() -> GF {
 #[serial]
 fn share_and_recon() {
     let gf = setup();
-    let pss = PackedSharing::new(5, 3, &gf);
+    let pss = PackedSharing::new(20, 5, 3, &gf);
     let mut rng = StepRng::new(1, 1);
 
     let secrets = vec![gf.get(7), gf.get(3), gf.get(12)];
     let shares = pss.share(&secrets, &gf, &mut rng);
 
-    assert_eq!(shares.len(), 15);
+    assert_eq!(shares.len(), 20);
 
     let recon_secrets = pss.semihon_recon(&shares, &gf);
 
@@ -33,7 +33,7 @@ fn share_and_recon() {
 #[serial]
 fn share_and_recon_linear_ops() {
     let gf = setup();
-    let pss = PackedSharing::new(5, 3, &gf);
+    let pss = PackedSharing::new(20, 5, 3, &gf);
     let mut rng = StepRng::new(1, 1);
 
     let secrets1 = vec![gf.get(7), gf.get(3), gf.get(12)];
@@ -53,7 +53,7 @@ fn share_and_recon_linear_ops() {
 #[serial]
 fn share_and_recon_malicious() {
     let gf = setup();
-    let pss = PackedSharing::new(5, 3, &gf);
+    let pss = PackedSharing::new(20, 5, 3, &gf);
     let mut rng = StepRng::new(1, 1);
 
     let secrets = vec![gf.get(7), gf.get(3), gf.get(12)];
@@ -69,13 +69,13 @@ fn share_and_recon_malicious() {
 #[serial]
 fn share_and_recon_n() {
     let gf = setup();
-    let pss = PackedSharing::new(5, 3, &gf);
+    let pss = PackedSharing::new(20, 5, 3, &gf);
     let mut rng = StepRng::new(1, 1);
 
     let secrets = vec![gf.get(7), gf.get(3), gf.get(12)];
     let shares = pss.share_n(&secrets, &gf, &mut rng);
 
-    assert_eq!(shares.len(), 15);
+    assert_eq!(shares.len(), 20);
 
     let recon_secrets = pss.recon_n(&shares, &gf);
 
@@ -87,7 +87,7 @@ fn share_and_recon_n() {
 #[serial]
 fn share_and_recon_n_linear_ops() {
     let gf = setup();
-    let pss = PackedSharing::new(5, 3, &gf);
+    let pss = PackedSharing::new(20, 5, 3, &gf);
     let mut rng = StepRng::new(1, 1);
 
     let secrets1 = vec![gf.get(7), gf.get(3), gf.get(12)];
@@ -107,7 +107,7 @@ fn share_and_recon_n_linear_ops() {
 #[serial]
 fn product_of_shares_with_recon_n() {
     let gf = setup();
-    let pss = PackedSharing::new(5, 3, &gf);
+    let pss = PackedSharing::new(20, 5, 3, &gf);
     let mut rng = StepRng::new(1, 1);
 
     let secrets1 = vec![gf.get(7), gf.get(3), gf.get(12)];
@@ -127,7 +127,7 @@ fn product_of_shares_with_recon_n() {
 #[serial]
 fn default_share_with_recon_n() {
     let gf = setup();
-    let pss = PackedSharing::new(5, 3, &gf);
+    let pss = PackedSharing::new(20, 5, 3, &gf);
     let mut rng = StepRng::new(1, 1);
 
     let secrets = vec![gf.get(7), gf.get(3), gf.get(12)];
@@ -141,11 +141,11 @@ fn default_share_with_recon_n() {
 #[serial]
 fn const_to_share() {
     let gf = setup();
-    let pss = PackedSharing::new(5, 3, &gf);
+    let pss = PackedSharing::new(20, 5, 3, &gf);
 
     let const_vals = vec![gf.get(7), gf.get(3), gf.get(12)];
 
-    let shares: Vec<_> = (0..15)
+    let shares: Vec<_> = (0..20)
         .map(|i| pss.const_to_share(&const_vals, i, &gf))
         .collect();
 

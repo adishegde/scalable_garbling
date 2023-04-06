@@ -14,21 +14,21 @@ pub struct RandContext {
     sharing: Arc<PackedSharing>,
     gf: Arc<GF>,
     net_builder: NetworkChannelBuilder,
-    num: usize,
+    n: usize,
 }
 
 impl RandContext {
     pub fn new(mpc_context: &MPCContext) -> Self {
         Self {
             super_inv: Arc::new(math::super_inv_matrix(
-                mpc_context.num,
-                mpc_context.num - mpc_context.t,
+                mpc_context.n,
+                mpc_context.n - mpc_context.t,
                 mpc_context.gf.as_ref(),
             )),
             sharing: mpc_context.sharing.clone(),
             gf: mpc_context.gf.clone(),
             net_builder: mpc_context.net_builder.clone(),
-            num: mpc_context.num,
+            n: mpc_context.n,
         }
     }
 }
@@ -49,7 +49,7 @@ pub async fn rand(id: ProtocolID, context: RandContext) -> Vec<PackedShare> {
         .await;
     }
 
-    let sent_shares: Vec<_> = network::message_from_each_party(chan.receiver(), context.num)
+    let sent_shares: Vec<_> = network::message_from_each_party(chan.receiver(), context.n)
         .await
         .into_iter()
         .map(|d| context.gf.deserialize_element(&d))

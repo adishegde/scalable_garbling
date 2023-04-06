@@ -34,8 +34,12 @@ pub struct ReceivedMessage {
 pub struct Stats(Vec<Arc<RwLock<(u64, u64)>>>);
 
 impl Stats {
-    fn new(num: usize) -> Self {
-        Stats((0..num).map(|_| Arc::new(RwLock::new((0, 0)))).collect())
+    fn new(num_parties: usize) -> Self {
+        Stats(
+            (0..num_parties)
+                .map(|_| Arc::new(RwLock::new((0, 0))))
+                .collect(),
+        )
     }
 
     async fn increment(&self, from: PartyID, proto_bytes: u64, net_bytes: u64) {
@@ -111,19 +115,19 @@ pub async fn setup_tcp_network(
     (stats, channel_builder)
 }
 
-pub async fn setup_local_network(num: usize) -> Vec<(Stats, NetworkChannelBuilder)> {
-    let mut stats = Vec::with_capacity(num);
-    let mut net_builders = Vec::with_capacity(num);
-    let mut router_r = Vec::with_capacity(num);
+pub async fn setup_local_network(num_parties: usize) -> Vec<(Stats, NetworkChannelBuilder)> {
+    let mut stats = Vec::with_capacity(num_parties);
+    let mut net_builders = Vec::with_capacity(num_parties);
+    let mut router_r = Vec::with_capacity(num_parties);
 
-    for _ in 0..num {
+    for _ in 0..num_parties {
         let (s, r) = unbounded::<SendMessage>();
         router_r.push(r);
         net_builders.push(ProtoChannelBuilder::new(s));
-        stats.push(Stats::new(num));
+        stats.push(Stats::new(num_parties));
     }
 
-    for pid in 0..num {
+    for pid in 0..num_parties {
         let net_builders = net_builders.clone();
         let mut party_router_r = router_r[pid].clone();
         let stats = stats.clone();
@@ -154,7 +158,7 @@ pub async fn setup_local_network(num: usize) -> Vec<(Stats, NetworkChannelBuilde
                             .expect("Protocol channel sender is open.");
                     }
                     Recipient::All => {
-                        for rid in 0..num {
+                        for rid in 0..num_parties {
                             if rid != pid as usize {
                                 stats[rid]
                                     .increment(pid, data_len as u64, data_len as u64)
@@ -187,13 +191,13 @@ pub async fn setup_local_network(num: usize) -> Vec<(Stats, NetworkChannelBuilde
 /// ones are dropped.
 pub async fn message_from_each_party(
     receiver: Receiver<ReceivedMessage>,
-    num: usize,
+    num_parties: usize,
 ) -> Vec<Vec<u8>> {
-    let mut mssgs = vec![Vec::new(); num];
-    let mut has_sent = vec![false; num];
+    let mut mssgs = vec![Vec::new(); num_parties];
+    let mut has_sent = vec![false; num_parties];
     let mut counter = 0;
 
-    while counter != num {
+    while counter != num_parties {
         let mssg = receiver.recv().await.unwrap();
         if !has_sent[mssg.from as usize] {
             mssgs[mssg.from as usize] = mssg.data;
