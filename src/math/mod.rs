@@ -1,3 +1,7 @@
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
+
 pub mod galois;
 
 use galois::{GFElement, GFMatrix, GF};
@@ -65,6 +69,31 @@ pub fn super_inv_matrix(num_inp: usize, num_out: usize, gf: &GF) -> GFMatrix {
         }
 
         matrix.push(row);
+    }
+
+    matrix
+}
+
+pub fn binary_super_inv_matrix(path: &Path, gf: &GF) -> GFMatrix {
+    let mut matrix = Vec::new();
+    let file = File::open(path).expect(
+        "Binary super-invertible matrix should be created using scripts/gen_binary_supmat.py.",
+    );
+    let reader = BufReader::new(file);
+
+    for line in reader.lines() {
+        let mut row = Vec::new();
+        let line = line.unwrap();
+
+        for val in line.split(" ") {
+            match val {
+                "0" => row.push(gf.zero()),
+                "1" => row.push(gf.one()),
+                _ => panic!("Binary super invertible matrix should only have binary entries"),
+            }
+        }
+
+        matrix.push(row)
     }
 
     matrix

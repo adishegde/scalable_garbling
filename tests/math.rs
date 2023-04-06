@@ -1,6 +1,8 @@
+use scalable_mpc::math;
 use scalable_mpc::math::galois::{GFElement, GF};
 use scalable_mpc::math::lagrange_coeffs;
 use serial_test::serial;
+use std::path::PathBuf;
 use std::thread;
 
 const GF_WIDTH: u8 = 18;
@@ -185,5 +187,21 @@ fn lagrange_coeffs_on_diff_evaluations() {
 
     for (&e, &o) in exp.iter().zip(out.iter()) {
         assert_eq!(e, o);
+    }
+}
+
+#[test]
+#[serial]
+fn binary_super_inv_matrix() {
+    let gf = setup();
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("tests/data/n16_t5.txt");
+
+    let matrix = math::binary_super_inv_matrix(&path, &gf);
+
+    for row in matrix {
+        for val in row {
+            assert!((val == gf.zero()) || (val == gf.one()));
+        }
     }
 }

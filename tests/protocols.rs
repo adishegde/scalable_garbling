@@ -4,6 +4,7 @@ use scalable_mpc::protocol::{network, preproc, MPCContext};
 use scalable_mpc::sharing;
 use scalable_mpc::{block_on, spawn};
 use serial_test::serial;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 const GF_WIDTH: u8 = 18;
@@ -49,15 +50,15 @@ async fn setup() -> (
 #[serial]
 fn rand() {
     block_on(async {
-        let proto_id = b"rand protocol".to_vec();
+        let proto_id = b"protocol".to_vec();
 
         let (gf, pss, contexts) = setup().await;
         let super_inv_matrix = Arc::new(math::super_inv_matrix(N, N - T, gf.as_ref()));
         let mut handles = Vec::new();
 
         for context in contexts {
-            let rand_context = preproc::RandContext::new(super_inv_matrix.clone(), &context);
-            handles.push(spawn(preproc::rand(proto_id.clone(), rand_context)));
+            let context = preproc::RandContext::new(super_inv_matrix.clone(), &context);
+            handles.push(spawn(preproc::rand(proto_id.clone(), context)));
         }
 
         let mut sharings = vec![Vec::with_capacity(N); N - T];
@@ -82,15 +83,15 @@ fn rand() {
 #[serial]
 fn zero() {
     block_on(async {
-        let proto_id = b"rand protocol".to_vec();
+        let proto_id = b"protocol".to_vec();
 
         let (gf, pss, contexts) = setup().await;
         let super_inv_matrix = Arc::new(math::super_inv_matrix(N, N - T, gf.as_ref()));
         let mut handles = Vec::new();
 
         for context in contexts {
-            let zero_context = preproc::ZeroContext::new(super_inv_matrix.clone(), &context);
-            handles.push(spawn(preproc::zero(proto_id.clone(), zero_context)));
+            let context = preproc::ZeroContext::new(super_inv_matrix.clone(), &context);
+            handles.push(spawn(preproc::zero(proto_id.clone(), context)));
         }
 
         let mut sharings = vec![Vec::with_capacity(N); N - T];
@@ -109,6 +110,45 @@ fn zero() {
 
         for sharing in sharings {
             assert_eq!(exp_out, pss.recon_n(&sharing, gf.as_ref()));
+        }
+    });
+}
+
+#[test]
+#[serial]
+fn randbit() {
+    block_on(async {
+        let proto_id = b"protocol".to_vec();
+
+        let (gf, pss, contexts) = setup().await;
+
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("tests/data/n16_t5.txt");
+        let bin_supinv_matrix = Arc::new(math::binary_super_inv_matrix(&path, &gf));
+
+        let mut handles = Vec::new();
+        for context in contexts {
+            let context = preproc::RandBitContext::new(bin_supinv_matrix.clone(), &context);
+            handles.push(spawn(preproc::randbit(proto_id.clone(), context)));
+        }
+
+        let mut sharings = vec![Vec::with_capacity(N); bin_supinv_matrix.len()];
+
+        for handle in handles {
+            let shares = handle.await;
+
+            assert_eq!(shares.len(), bin_supinv_matrix.len());
+
+            for (i, share) in shares.into_iter().enumerate() {
+                sharings[i].push(share);
+            }
+        }
+
+        for sharing in sharings {
+            let secrets = pss.recon_n(&sharing, gf.as_ref());
+            for secret in secrets {
+                assert!((secret == gf.one()) || (secret == gf.zero()));
+            }
         }
     });
 }
