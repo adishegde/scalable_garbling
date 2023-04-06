@@ -1,5 +1,6 @@
 use crate::math::galois::GF;
 use crate::sharing::PackedSharing;
+use crate::PartyID;
 use smol::channel::{unbounded, Receiver, Sender};
 use smol::lock::RwLock;
 use std::collections::HashMap;
@@ -160,10 +161,11 @@ impl<S, R> Clone for ProtoChannelBuilder<S, R> {
 }
 
 pub struct MPCContext {
-    n: usize,
-    t: usize,
-    l: usize,
-    gf: Arc<GF>,
-    sharing: Arc<PackedSharing>,
-    net_builder: network::NetworkChannelBuilder,
+    pub id: PartyID,
+    pub n: usize,
+    pub t: usize,
+    pub l: usize,
+    pub gf: Arc<GF>,
+    pub pss: Arc<PackedSharing>,
+    pub net_builder: network::NetworkChannelBuilder,
 }
