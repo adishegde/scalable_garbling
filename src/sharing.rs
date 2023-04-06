@@ -1,4 +1,4 @@
-use crate::math::galois::{GFElement, GF};
+use crate::math::galois::{GFElement, GFMatrix, GF};
 use crate::math::lagrange_coeffs;
 use crate::utils::iprod;
 use crate::PartyID;
@@ -18,22 +18,22 @@ pub struct PackedSharing {
     n: usize,
     // Coefficients to compute `t + l - 1` degree sharings from secrets.
     // Dimensions: `n - t` vectors each of length `t + l`.
-    share_coeffs: Vec<Vec<GFElement>>,
+    share_coeffs: GFMatrix,
     // Coefficients to compute secrets from `t + l - 1` degree sharings.
     // Dimensions: `n - t` vectors each of length `t + l`.
-    recon_coeffs: Vec<Vec<GFElement>>,
+    recon_coeffs: GFMatrix,
     // Coefficients to compute a random `t + l - 1` degree sharing.
     // Dimensions: `n - t - l` vectors each of length `t + l`.
-    rand_coeffs: Vec<Vec<GFElement>>,
+    rand_coeffs: GFMatrix,
     // Coefficients to compute shares over `n-1` degree polynomials.
     // Dimensions: `l` vectors each of length `n`.
-    share_coeffs_n: Vec<Vec<GFElement>>,
+    share_coeffs_n: GFMatrix,
     // Coefficients to compute secrets from `n-1` degree polynomial sharing.
     // Dimensions: `l` vectors each of length `n`.
-    recon_coeffs_n: Vec<Vec<GFElement>>,
+    recon_coeffs_n: GFMatrix,
     // Coefficiens to compute shares over `l-1` degree polynomials.
     // Dimensions: `n` vectors each of length `l`.
-    share_coeffs_l: Vec<Vec<GFElement>>,
+    share_coeffs_l: GFMatrix,
 }
 
 impl PackedSharing {

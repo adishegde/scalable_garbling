@@ -1,10 +1,10 @@
 pub mod galois;
 
-use galois::{GFElement, GF};
+use galois::{GFElement, GFMatrix, GF};
 
 // Compute lagrange coefficients for interpolating a polynomial defined by evaluations at `cpos`
 // to evaluations at `npos`.
-pub fn lagrange_coeffs(cpos: &[GFElement], npos: &[GFElement], gf: &GF) -> Vec<Vec<GFElement>> {
+pub fn lagrange_coeffs(cpos: &[GFElement], npos: &[GFElement], gf: &GF) -> GFMatrix {
     let gf_one = gf.one();
     let gf_zero = gf.zero();
 
@@ -49,7 +49,7 @@ pub fn lagrange_coeffs(cpos: &[GFElement], npos: &[GFElement], gf: &GF) -> Vec<V
     all_coeffs
 }
 
-pub fn super_inv_matrix(num_inp: usize, num_out: usize, gf: &GF) -> Vec<Vec<GFElement>> {
+pub fn super_inv_matrix(num_inp: usize, num_out: usize, gf: &GF) -> GFMatrix {
     let mut matrix = Vec::with_capacity(num_out);
     matrix.push(vec![gf.one(); num_inp]);
 

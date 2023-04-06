@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod network;
-pub mod rand;
+pub mod preproc;
 
 /// Unique identifier for a protocol.
 pub type ProtocolID = Vec<u8>;

@@ -177,3 +177,6 @@ impl Div for GFElement {
         res
     }
 }
+
+/// Matrix over a Galois field.
+pub type GFMatrix = Vec<Vec<GFElement>>;
