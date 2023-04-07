@@ -6,6 +6,7 @@ use smol::lock::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub mod core;
 pub mod network;
 pub mod preproc;
 

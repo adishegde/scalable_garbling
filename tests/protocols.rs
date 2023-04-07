@@ -1,6 +1,7 @@
+use rand::rngs::mock::StepRng;
 use scalable_mpc::math;
 use scalable_mpc::math::galois;
-use scalable_mpc::protocol::{network, preproc, MPCContext};
+use scalable_mpc::protocol::{core, network, preproc, MPCContext};
 use scalable_mpc::sharing;
 use scalable_mpc::{block_on, spawn};
 use serial_test::serial;
@@ -150,5 +151,87 @@ fn randbit() {
                 assert!((secret == gf.one()) || (secret == gf.zero()));
             }
         }
+    });
+}
+
+#[test]
+#[serial]
+fn reduce_degree() {
+    block_on(async {
+        let mut rng = StepRng::new(1, 1);
+        let proto_id = b"protocol".to_vec();
+
+        let (gf, pss, contexts) = setup().await;
+
+        let secrets: Vec<_> = gf.get_range(1..(L + 1).try_into().unwrap()).collect();
+        let x_shares = pss.share(&secrets, gf.as_ref(), &mut rng);
+        let zero_shares = pss.share(&vec![gf.zero(); L], gf.as_ref(), &mut rng);
+        let rand_shares = pss.rand(gf.as_ref(), &mut rng);
+
+        let mut handles = Vec::new();
+        for (i, context) in contexts.into_iter().enumerate() {
+            handles.push(spawn(core::reduce_degree(
+                proto_id.clone(),
+                x_shares[i],
+                rand_shares[i],
+                zero_shares[i],
+                context,
+            )));
+        }
+
+        let mut out_shares = Vec::with_capacity(N);
+        for handle in handles {
+            out_shares.push(handle.await);
+        }
+
+        let out_secrets = pss.recon(&out_shares, gf.as_ref()).unwrap();
+
+        assert_eq!(out_secrets, secrets);
+    });
+}
+
+#[test]
+#[serial]
+fn mult() {
+    block_on(async {
+        let mut rng = StepRng::new(1, 1);
+        let proto_id = b"protocol".to_vec();
+
+        let (gf, pss, contexts) = setup().await;
+
+        let x_secrets: Vec<_> = gf.get_range(1..(L + 1).try_into().unwrap()).collect();
+        let y_secrets: Vec<_> = gf
+            .get_range((L + 1).try_into().unwrap()..(2 * L + 1).try_into().unwrap())
+            .collect();
+        let x_shares = pss.share(&x_secrets, gf.as_ref(), &mut rng);
+        let y_shares = pss.share(&y_secrets, gf.as_ref(), &mut rng);
+        let zero_shares = pss.share(&vec![gf.zero(); L], gf.as_ref(), &mut rng);
+        let rand_shares = pss.rand(gf.as_ref(), &mut rng);
+
+        let mut handles = Vec::new();
+        for (i, context) in contexts.into_iter().enumerate() {
+            handles.push(spawn(core::mult(
+                proto_id.clone(),
+                x_shares[i],
+                y_shares[i],
+                rand_shares[i],
+                zero_shares[i],
+                context,
+            )));
+        }
+
+        let mut out_shares = Vec::with_capacity(N);
+        for handle in handles {
+            out_shares.push(handle.await);
+        }
+
+        let out_secrets = pss.recon(&out_shares, gf.as_ref()).unwrap();
+        let exp: Vec<_> = x_secrets
+            .into_iter()
+            .zip(y_secrets.into_iter())
+            .map(|(xval, yval)| xval * yval)
+            .collect();
+
+        assert_eq!(out_secrets, exp);
     });
 }
