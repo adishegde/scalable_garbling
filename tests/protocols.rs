@@ -1,4 +1,5 @@
-use rand::rngs::mock::StepRng;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use scalable_mpc::math;
 use scalable_mpc::math::galois;
 use scalable_mpc::protocol::{core, network, preproc, MPCContext};
@@ -158,7 +159,7 @@ fn randbit() {
 #[serial]
 fn reduce_degree() {
     block_on(async {
-        let mut rng = StepRng::new(1, 1);
+        let mut rng = StdRng::seed_from_u64(200);
         let proto_id = b"protocol".to_vec();
 
         let (gf, pss, contexts) = setup().await;
@@ -194,7 +195,7 @@ fn reduce_degree() {
 #[serial]
 fn mult() {
     block_on(async {
-        let mut rng = StepRng::new(1, 1);
+        let mut rng = StdRng::seed_from_u64(200);
         let proto_id = b"protocol".to_vec();
 
         let (gf, pss, contexts) = setup().await;
@@ -233,5 +234,167 @@ fn mult() {
             .collect();
 
         assert_eq!(out_secrets, exp);
+    });
+}
+
+#[test]
+#[serial]
+fn trans() {
+    block_on(async {
+        let mut rng = StdRng::seed_from_u64(200);
+        let proto_id = b"protocol".to_vec();
+
+        let (gf, pss, contexts) = setup().await;
+
+        let l: u32 = L.try_into().unwrap();
+        let n: u32 = N.try_into().unwrap();
+        let secrets: Vec<_> = gf.get_range(1..(l + 1)).collect();
+        let rand_secrets: Vec<_> = (0..l).map(|_| gf.rand(&mut rng)).collect();
+        let old_pos: Vec<_> = gf.get_range(200..(200 + l)).collect();
+        let new_pos: Vec<_> = gf.get_range(300..(300 + l)).collect();
+        let f_trans = |v: &[galois::GFElement]| vec![v[1], v[2], v[1]];
+
+        let mut gen_shares_over_pos = |coeffs: galois::GFMatrix, secrets: &[galois::GFElement]| {
+            let num_points = coeffs[0].len();
+            let mut shares: Vec<_> = (0..(num_points - secrets.len()))
+                .map(|_| gf.rand(&mut rng))
+                .collect();
+            let points: Vec<_> = secrets.iter().chain(shares.iter()).copied().collect();
+            shares.extend(math::utils::matrix_vector_prod(
+                &coeffs,
+                &points,
+                gf.as_ref(),
+            ));
+            shares
+        };
+
+        let old_shares = {
+            let coeffs = pss.share_coeffs(&old_pos, gf.as_ref());
+            gen_shares_over_pos(coeffs, &secrets)
+        };
+        let random_n = {
+            let coeffs = pss.share_coeffs_n(&old_pos, gf.as_ref());
+            gen_shares_over_pos(coeffs, &rand_secrets)
+        };
+        let random = {
+            let coeffs = pss.share_coeffs(&new_pos, gf.as_ref());
+            gen_shares_over_pos(coeffs, &f_trans(&rand_secrets))
+        };
+
+        let mut handles = Vec::new();
+        for (i, context) in contexts.into_iter().enumerate() {
+            let transform =
+                core::SharingTransform::new(&old_pos, &new_pos, Box::new(f_trans), &pss, &gf);
+
+            handles.push(spawn(core::trans(
+                proto_id.clone(),
+                old_shares[i],
+                random[i],
+                random_n[i],
+                transform,
+                context,
+            )));
+        }
+
+        let mut out_shares = Vec::with_capacity(N);
+        for handle in handles {
+            out_shares.push(handle.await);
+        }
+
+        let out_secrets: Vec<_> = {
+            let cpos: Vec<_> = gf.get_range(l..(n + l)).collect();
+            let coeffs = math::lagrange_coeffs(&cpos, &new_pos, gf.as_ref());
+            math::utils::matrix_vector_prod(&coeffs, &out_shares, gf.as_ref()).collect()
+        };
+
+        assert_eq!(out_secrets, f_trans(&secrets));
+    });
+}
+
+#[test]
+#[serial]
+fn randtrans() {
+    block_on(async {
+        let mut rng = StdRng::seed_from_u64(200);
+        let proto_id = b"protocol".to_vec();
+
+        let (gf, pss, contexts) = setup().await;
+
+        let l: u32 = L.try_into().unwrap();
+        let n: u32 = N.try_into().unwrap();
+        let old_pos: Vec<Vec<galois::GFElement>> = vec![
+            gf.get_range(200..(200 + l)).collect(),
+            gf.get_range(250..(250 + l)).collect(),
+            gf.get_range(225..(225 + l)).collect(),
+        ];
+        let new_pos: Vec<_> = vec![
+            gf.get_range(300..(300 + l)).collect(),
+            gf.get_range(350..(350 + l)).collect(),
+            gf.get_range(325..(325 + l)).collect(),
+        ];
+        let f_trans: Vec<Box<dyn Fn(&[sharing::PackedShare]) -> Vec<sharing::PackedShare>>> = vec![
+            Box::new(|v: &[galois::GFElement]| v.to_vec()),
+            Box::new(|v: &[galois::GFElement]| vec![v[2], v[1], v[0]]),
+            Box::new(|v: &[galois::GFElement]| vec![v[2], v[0], v[2]]),
+        ];
+
+        let randoms: Vec<_> = (0..(N + T))
+            .map(|_| pss.rand(gf.as_ref(), &mut rng))
+            .collect();
+        let zeros: Vec<_> = {
+            let secrets = vec![gf.zero(); L];
+            (0..(2 * N))
+                .map(|_| pss.share_n(&secrets, gf.as_ref(), &mut rng))
+                .collect()
+        };
+
+        let mut handles = Vec::new();
+        for (i, context) in contexts.into_iter().enumerate() {
+            let randoms: Vec<_> = randoms.iter().map(|v| v[i]).collect();
+            let zeros: Vec<_> = zeros.iter().map(|v| v[i]).collect();
+            let transform = core::RandSharingTransform::new(
+                i.try_into().unwrap(),
+                &old_pos,
+                &new_pos,
+                &f_trans,
+                pss.as_ref(),
+                gf.as_ref(),
+            );
+
+            handles.push(spawn(core::randtrans(
+                proto_id.clone(),
+                randoms,
+                zeros,
+                transform,
+                context,
+            )));
+        }
+
+        let mut sharings = vec![Vec::with_capacity(N); L];
+        let mut sharings_n = vec![Vec::with_capacity(N); L];
+        for handle in handles {
+            let shares = handle.await;
+            for (i, share) in shares.into_iter().enumerate() {
+                sharings[i].push(share.0);
+                sharings_n[i].push(share.1);
+            }
+        }
+
+        for (i, (sharing, sharing_n)) in
+            sharings.into_iter().zip(sharings_n.into_iter()).enumerate()
+        {
+            let secrets: Vec<_> = {
+                let cpos: Vec<_> = gf.get_range(l..(n + l)).collect();
+                let coeffs = math::lagrange_coeffs(&cpos, &new_pos[i], gf.as_ref());
+                math::utils::matrix_vector_prod(&coeffs, &sharing, gf.as_ref()).collect()
+            };
+
+            let secrets_n: Vec<_> = {
+                let coeffs = pss.recon_coeffs_n(&old_pos[i], gf.as_ref());
+                math::utils::matrix_vector_prod(&coeffs, &sharing_n, gf.as_ref()).collect()
+            };
+
+            assert_eq!(secrets, f_trans[i](&secrets_n));
+        }
     });
 }

@@ -1,5 +1,7 @@
-use rand::rngs::mock::StepRng;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use scalable_mpc::math::galois::GF;
+use scalable_mpc::math::utils;
 use scalable_mpc::sharing::PackedSharing;
 use scalable_mpc::ProtoErrorKind;
 use serial_test::serial;
@@ -16,7 +18,7 @@ fn setup() -> GF {
 fn share_and_recon() {
     let gf = setup();
     let pss = PackedSharing::new(20, 5, 3, &gf);
-    let mut rng = StepRng::new(1, 1);
+    let mut rng = StdRng::seed_from_u64(200);
 
     let secrets = vec![gf.get(7), gf.get(3), gf.get(12)];
     let shares = pss.share(&secrets, &gf, &mut rng);
@@ -34,7 +36,7 @@ fn share_and_recon() {
 fn share_and_recon_linear_ops() {
     let gf = setup();
     let pss = PackedSharing::new(20, 5, 3, &gf);
-    let mut rng = StepRng::new(1, 1);
+    let mut rng = StdRng::seed_from_u64(200);
 
     let secrets1 = vec![gf.get(7), gf.get(3), gf.get(12)];
     let secrets2 = vec![gf.get(4), gf.get(0), gf.get(100)];
@@ -54,7 +56,7 @@ fn share_and_recon_linear_ops() {
 fn share_and_recon_malicious() {
     let gf = setup();
     let pss = PackedSharing::new(20, 5, 3, &gf);
-    let mut rng = StepRng::new(1, 1);
+    let mut rng = StdRng::seed_from_u64(200);
 
     let secrets = vec![gf.get(7), gf.get(3), gf.get(12)];
     let mut shares = pss.share(&secrets, &gf, &mut rng);
@@ -70,7 +72,7 @@ fn share_and_recon_malicious() {
 fn share_and_recon_n() {
     let gf = setup();
     let pss = PackedSharing::new(20, 5, 3, &gf);
-    let mut rng = StepRng::new(1, 1);
+    let mut rng = StdRng::seed_from_u64(200);
 
     let secrets = vec![gf.get(7), gf.get(3), gf.get(12)];
     let shares = pss.share_n(&secrets, &gf, &mut rng);
@@ -88,7 +90,7 @@ fn share_and_recon_n() {
 fn share_and_recon_n_linear_ops() {
     let gf = setup();
     let pss = PackedSharing::new(20, 5, 3, &gf);
-    let mut rng = StepRng::new(1, 1);
+    let mut rng = StdRng::seed_from_u64(200);
 
     let secrets1 = vec![gf.get(7), gf.get(3), gf.get(12)];
     let secrets2 = vec![gf.get(4), gf.get(0), gf.get(100)];
@@ -108,7 +110,7 @@ fn share_and_recon_n_linear_ops() {
 fn product_of_shares_with_recon_n() {
     let gf = setup();
     let pss = PackedSharing::new(20, 5, 3, &gf);
-    let mut rng = StepRng::new(1, 1);
+    let mut rng = StdRng::seed_from_u64(200);
 
     let secrets1 = vec![gf.get(7), gf.get(3), gf.get(12)];
     let secrets2 = vec![gf.get(4), gf.get(0), gf.get(100)];
@@ -128,7 +130,7 @@ fn product_of_shares_with_recon_n() {
 fn default_share_with_recon_n() {
     let gf = setup();
     let pss = PackedSharing::new(20, 5, 3, &gf);
-    let mut rng = StepRng::new(1, 1);
+    let mut rng = StdRng::seed_from_u64(200);
 
     let secrets = vec![gf.get(7), gf.get(3), gf.get(12)];
     let shares = pss.share(&secrets, &gf, &mut rng);
@@ -152,4 +154,56 @@ fn const_to_share() {
     let recon_vals = pss.semihon_recon(&shares, &gf);
 
     assert_eq!(recon_vals, const_vals);
+}
+
+#[test]
+#[serial]
+fn share_coeffs() {
+    let gf = setup();
+    let pss = PackedSharing::new(20, 5, 3, &gf);
+
+    let secrets = vec![gf.get(7), gf.get(3), gf.get(12)];
+    let pos = vec![gf.get(100), gf.get(103), gf.get(109)];
+
+    let share_coeffs = pss.share_coeffs(&pos, &gf);
+    let recon_coeffs = pss.recon_coeffs_n(&pos, &gf);
+
+    assert_eq!(share_coeffs.len(), 15);
+    assert_eq!(recon_coeffs.len(), 3);
+
+    let shares = {
+        let mut shares: Vec<_> = gf.get_range(1..6).collect();
+        let points: Vec<_> = secrets.iter().chain(shares.iter()).copied().collect();
+        shares.extend(utils::matrix_vector_prod(&share_coeffs, &points, &gf));
+        shares
+    };
+    let recon_vals: Vec<_> = utils::matrix_vector_prod(&recon_coeffs, &shares, &gf).collect();
+
+    assert_eq!(recon_vals, secrets);
+}
+
+#[test]
+#[serial]
+fn share_coeffs_n() {
+    let gf = setup();
+    let pss = PackedSharing::new(20, 5, 3, &gf);
+
+    let secrets = vec![gf.get(7), gf.get(3), gf.get(12)];
+    let pos = vec![gf.get(100), gf.get(103), gf.get(109)];
+
+    let share_coeffs = pss.share_coeffs_n(&pos, &gf);
+    let recon_coeffs = pss.recon_coeffs_n(&pos, &gf);
+
+    assert_eq!(share_coeffs.len(), 3);
+    assert_eq!(recon_coeffs.len(), 3);
+
+    let shares = {
+        let mut shares: Vec<_> = gf.get_range(1..18).collect();
+        let points: Vec<_> = secrets.iter().chain(shares.iter()).copied().collect();
+        shares.extend(utils::matrix_vector_prod(&share_coeffs, &points, &gf));
+        shares
+    };
+    let recon_vals: Vec<_> = utils::matrix_vector_prod(&recon_coeffs, &shares, &gf).collect();
+
+    assert_eq!(recon_vals, secrets);
 }

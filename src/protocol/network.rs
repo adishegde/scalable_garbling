@@ -1,5 +1,5 @@
 use super::{ProtoChannelBuilder, ProtocolID};
-use crate::utils::spawn;
+use crate::spawn;
 use crate::PartyID;
 use smol;
 use smol::channel::{unbounded, Receiver};

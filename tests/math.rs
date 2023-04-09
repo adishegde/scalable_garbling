@@ -117,13 +117,25 @@ fn ops_in_parallel() {
 
 #[test]
 #[serial]
-fn serialize_and_deserialize() {
+fn serialize_and_deserialize_element() {
     let gf = setup();
     let a = gf.get(53);
     let bytes = gf.serialize_element(&a);
     let b = gf.deserialize_element(&bytes);
 
     assert_eq!(bytes.len(), 3);
+    assert_eq!(a, b);
+}
+
+#[test]
+#[serial]
+fn serialize_and_deserialize_vec() {
+    let gf = setup();
+    let a = vec![gf.get(53), gf.get(133), gf.get(23)];
+    let bytes = gf.serialize_vec(&a);
+    let b = gf.deserialize_vec(&bytes);
+
+    assert_eq!(bytes.len(), 9);
     assert_eq!(a, b);
 }
 

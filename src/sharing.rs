@@ -1,6 +1,6 @@
 use crate::math::galois::{GFElement, GFMatrix, GF};
 use crate::math::lagrange_coeffs;
-use crate::utils::iprod;
+use crate::math::utils::{iprod, matrix_vector_prod};
 use crate::PartyID;
 use crate::ProtoErrorKind;
 use rand::Rng;
@@ -92,6 +92,21 @@ impl PackedSharing {
         }
     }
 
+    /// Number of secrets per sharing.
+    pub fn packing_param(&self) -> u32 {
+        self.l.try_into().unwrap()
+    }
+
+    /// Total number of parties.
+    pub fn num_parties(&self) -> u32 {
+        self.n.try_into().unwrap()
+    }
+
+    /// Maximum number of corrupt parties.
+    pub fn threshold(&self) -> u32 {
+        self.t.try_into().unwrap()
+    }
+
     /// Secret shares over a `t + l - 1` degree polynomial.
     /// Returns an `n` length vector corresponding to the share of each party.
     ///
@@ -115,11 +130,7 @@ impl PackedSharing {
         }
 
         shares.extend_from_slice(&inp[self.l..]);
-        shares.extend(
-            self.share_coeffs
-                .iter()
-                .map(|c| iprod(c.iter(), inp.iter(), gf)),
-        );
+        shares.extend(matrix_vector_prod(&self.share_coeffs, &inp, gf));
 
         shares
     }
@@ -132,11 +143,7 @@ impl PackedSharing {
         inp.extend((0..(self.t + self.l)).map(|_| gf.rand(rng)));
 
         shares.extend_from_slice(&inp[..]);
-        shares.extend(
-            self.rand_coeffs
-                .iter()
-                .map(|c| iprod(c.iter(), inp.iter(), gf)),
-        );
+        shares.extend(matrix_vector_prod(&self.rand_coeffs, &inp, gf));
 
         shares
     }
@@ -147,10 +154,12 @@ impl PackedSharing {
     ///
     /// `shares` should be of length `n` but this is not checked within the method.
     pub fn semihon_recon(&self, shares: &[PackedShare], gf: &GF) -> Vec<GFElement> {
-        self.recon_coeffs[..self.l]
-            .iter()
-            .map(|c| iprod(c.iter(), shares[(self.n - self.t - self.l)..].iter(), gf))
-            .collect()
+        matrix_vector_prod(
+            &self.recon_coeffs[..self.l],
+            &shares[(self.n - self.t - self.l)..],
+            gf,
+        )
+        .collect()
     }
 
     /// Reconstructs secrets from a `t + l - 1` degree sharing while ensuring that all input shares
@@ -161,11 +170,12 @@ impl PackedSharing {
             return Err(ProtoErrorKind::Other("Expected one share from each party."));
         }
 
-        let recon_vals: Vec<_> = self
-            .recon_coeffs
-            .iter()
-            .map(|c| iprod(c.iter(), shares[(self.n - self.t - self.l)..].iter(), gf))
-            .collect();
+        let recon_vals: Vec<_> = matrix_vector_prod(
+            &self.recon_coeffs,
+            &shares[(self.n - self.t - self.l)..],
+            gf,
+        )
+        .collect();
 
         for (i, &v) in recon_vals[self.l..].iter().enumerate() {
             if v != shares[i] {
@@ -174,6 +184,22 @@ impl PackedSharing {
         }
 
         Ok(recon_vals[..self.l].to_vec())
+    }
+
+    /// Coefficients to interpolate `t + l` points corresponding to `l` secrets at position pos and
+    /// shares of first `t` parties to the shares of the remaining `n - t` parties.
+    pub fn share_coeffs(&self, pos: &[GFElement], gf: &GF) -> GFMatrix {
+        let l: u32 = self.l.try_into().unwrap();
+        let t: u32 = self.t.try_into().unwrap();
+        let n: u32 = self.n.try_into().unwrap();
+
+        let mut cpos = Vec::with_capacity(self.t + self.l);
+        cpos.extend_from_slice(pos);
+        cpos.extend(gf.get_range(l..(l + t)));
+
+        let npos: Vec<_> = gf.get_range((l + t)..(n + l)).collect();
+
+        lagrange_coeffs(&cpos, &npos, gf)
     }
 
     /// Secret shares over a `n - 1 = 2t + 2l - 2` degree polynomial.
@@ -197,11 +223,7 @@ impl PackedSharing {
         }
 
         shares.extend_from_slice(&inp[self.l..]);
-        shares.extend(
-            self.share_coeffs_n
-                .iter()
-                .map(|c| iprod(c.iter(), inp.iter(), gf)),
-        );
+        shares.extend(matrix_vector_prod(&self.share_coeffs_n, &inp, gf));
 
         shares
     }
@@ -216,10 +238,31 @@ impl PackedSharing {
     ///
     /// `shares` should be of length `n` but this is not checked within the method.
     pub fn recon_n(&self, shares: &[PackedShare], gf: &GF) -> Vec<GFElement> {
-        self.recon_coeffs_n
-            .iter()
-            .map(|c| iprod(c.iter(), shares.iter(), gf))
-            .collect()
+        matrix_vector_prod(&self.recon_coeffs_n, &shares, gf).collect()
+    }
+
+    /// Coefficients to interpolate `n` points corresponding to `l` secrets at position pos and
+    /// shares of first `n - l` parties to the n-1 degree shares of the remaining `l` parties.
+    pub fn share_coeffs_n(&self, pos: &[GFElement], gf: &GF) -> GFMatrix {
+        let l: u32 = self.l.try_into().unwrap();
+        let n: u32 = self.n.try_into().unwrap();
+
+        let mut cpos = Vec::with_capacity(self.t + self.l);
+        cpos.extend_from_slice(pos);
+        cpos.extend(gf.get_range(l..n));
+
+        let npos: Vec<_> = gf.get_range(n..(n + l)).collect();
+
+        lagrange_coeffs(&cpos, &npos, gf)
+    }
+
+    /// Coefficients to reconstruct secrets at position pos from an `n-1` degree sharing.
+    pub fn recon_coeffs_n(&self, pos: &[GFElement], gf: &GF) -> GFMatrix {
+        let l: u32 = self.l.try_into().unwrap();
+        let n: u32 = self.n.try_into().unwrap();
+        let share_pos: Vec<_> = gf.get_range(l..(n + l)).collect();
+
+        lagrange_coeffs(&share_pos, pos, gf)
     }
 
     /// Returns the i-th party's share for a `l-1` degree polynomial encoding of `l` secrets.

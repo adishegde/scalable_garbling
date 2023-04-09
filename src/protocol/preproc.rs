@@ -2,6 +2,7 @@ use super::network;
 use super::network::{NetworkChannelBuilder, Recipient, SendMessage};
 use super::{MPCContext, ProtocolID};
 use crate::math::galois::{GFMatrix, GF};
+use crate::math::utils;
 use crate::sharing::{PackedShare, PackedSharing};
 use crate::PartyID;
 use rand::{thread_rng, Rng};
@@ -53,7 +54,7 @@ pub async fn rand(id: ProtocolID, context: RandContext) -> Vec<PackedShare> {
     context
         .super_inv
         .iter()
-        .map(|row| crate::utils::iprod(row.iter(), sent_shares.iter(), context.gf.as_ref()))
+        .map(|row| utils::iprod(row.iter(), sent_shares.iter(), context.gf.as_ref()))
         .collect()
 }
 
@@ -106,7 +107,7 @@ pub async fn zero(id: ProtocolID, context: ZeroContext) -> Vec<PackedShare> {
     context
         .super_inv
         .iter()
-        .map(|row| crate::utils::iprod(row.iter(), sent_shares.iter(), context.gf.as_ref()))
+        .map(|row| utils::iprod(row.iter(), sent_shares.iter(), context.gf.as_ref()))
         .collect()
 }
 
@@ -167,6 +168,6 @@ pub async fn randbit(id: ProtocolID, context: RandBitContext) -> Vec<PackedShare
     context
         .bin_super_inv
         .iter()
-        .map(|row| crate::utils::iprod(row.iter(), sent_shares.iter(), context.gf.as_ref()))
+        .map(|row| utils::iprod(row.iter(), sent_shares.iter(), context.gf.as_ref()))
         .collect()
 }

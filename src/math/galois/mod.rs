@@ -78,15 +78,45 @@ impl GF {
 
     /// Deserialize a field element.
     pub fn deserialize_element(&self, bytes: &[u8]) -> GFElement {
-        let mut be_bytes = [0, 0, 0, 0];
+        let mut le_bytes = [0, 0, 0, 0];
         for i in 0..bytes.len() {
-            be_bytes[i] = bytes[i];
+            le_bytes[i] = bytes[i];
         }
 
         GFElement {
-            value: u32::from_le_bytes(be_bytes),
+            value: u32::from_le_bytes(le_bytes),
             width: self.width,
         }
+    }
+
+    /// Serialize a slice of elements into bytes.
+    pub fn serialize_vec(&self, elements: &[GFElement]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.num_bytes * elements.len());
+        for element in elements {
+            bytes.extend_from_slice(&element.value.to_le_bytes()[..self.num_bytes]);
+        }
+
+        bytes
+    }
+
+    /// Deserialize a slice of elements into bytes.
+    pub fn deserialize_vec(&self, bytes: &[u8]) -> Vec<GFElement> {
+        let num = bytes.len() / self.num_bytes;
+        let mut elements = Vec::with_capacity(num);
+
+        for le_chunk in bytes.chunks(self.num_bytes) {
+            let mut le_bytes = [0, 0, 0, 0];
+            for (i, &v) in le_chunk.iter().enumerate() {
+                le_bytes[i] = v;
+            }
+
+            elements.push(GFElement {
+                value: u32::from_le_bytes(le_bytes),
+                width: self.width,
+            });
+        }
+
+        elements
     }
 }
 

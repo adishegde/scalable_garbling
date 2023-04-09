@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 pub mod galois;
+pub mod utils;
 
 use galois::{GFElement, GFMatrix, GF};
 
