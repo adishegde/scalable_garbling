@@ -2,6 +2,7 @@ use async_global_executor;
 use smol::prelude::Future;
 use smol::Task;
 
+pub mod circuit;
 pub mod math;
 pub mod protocol;
 pub mod sharing;

@@ -1,3 +1,4 @@
+use super::core;
 use super::network;
 use super::network::{NetworkChannelBuilder, Recipient, SendMessage};
 use super::{MPCContext, ProtocolID};
@@ -170,4 +171,21 @@ pub async fn randbit(id: ProtocolID, context: RandBitContext) -> Vec<PackedShare
         .iter()
         .map(|row| utils::iprod(row.iter(), sent_shares.iter(), context.gf.as_ref()))
         .collect()
+}
+
+pub async fn lpn_error(
+    id: ProtocolID,
+    randbits: Vec<PackedShare>,
+    randoms: Vec<PackedShare>,
+    zeros: Vec<PackedShare>,
+    context: MPCContext,
+) -> PackedShare {
+    let mut prod = randbits[0];
+
+    let mult_preproc_iter = randoms.into_iter().zip(zeros.into_iter());
+    for (inp, (r, z)) in randbits.into_iter().skip(1).zip(mult_preproc_iter) {
+        prod = core::mult(id.clone(), prod, inp, r, z, context.clone()).await;
+    }
+
+    prod
 }
