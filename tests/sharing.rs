@@ -207,3 +207,25 @@ fn share_coeffs_n() {
 
     assert_eq!(recon_vals, secrets);
 }
+
+#[test]
+#[serial]
+fn const_coeffs() {
+    let gf = setup();
+    let pss = PackedSharing::new(20, 5, 3, &gf);
+
+    let secrets = vec![gf.get(7), gf.get(3), gf.get(12)];
+    let pos = vec![gf.get(100), gf.get(103), gf.get(109)];
+
+    let shares: Vec<_> = (0..20)
+        .map(|i| {
+            let coeffs = pss.const_coeffs(&pos, i, &gf);
+            utils::iprod(&coeffs, &secrets, &gf)
+        })
+        .collect();
+
+    let recon_coeffs = pss.recon_coeffs_n(&pos, &gf);
+    let recon_vals: Vec<_> = utils::matrix_vector_prod(&recon_coeffs, &shares, &gf).collect();
+
+    assert_eq!(recon_vals, secrets);
+}

@@ -52,11 +52,12 @@ pub async fn rand(id: ProtocolID, context: RandContext) -> Vec<PackedShare> {
         .map(|d| context.gf.deserialize_element(&d))
         .collect();
 
-    context
-        .super_inv
-        .iter()
-        .map(|row| utils::iprod(row.iter(), sent_shares.iter(), context.gf.as_ref()))
-        .collect()
+    utils::matrix_vector_prod(
+        context.super_inv.as_ref(),
+        &sent_shares,
+        context.gf.as_ref(),
+    )
+    .collect()
 }
 
 #[derive(Clone)]
@@ -105,11 +106,12 @@ pub async fn zero(id: ProtocolID, context: ZeroContext) -> Vec<PackedShare> {
         .map(|d| context.gf.deserialize_element(&d))
         .collect();
 
-    context
-        .super_inv
-        .iter()
-        .map(|row| utils::iprod(row.iter(), sent_shares.iter(), context.gf.as_ref()))
-        .collect()
+    utils::matrix_vector_prod(
+        context.super_inv.as_ref(),
+        &sent_shares,
+        context.gf.as_ref(),
+    )
+    .collect()
 }
 
 #[derive(Clone)]
@@ -135,9 +137,13 @@ impl RandBitContext {
     }
 }
 
-pub async fn randbit(id: ProtocolID, context: RandBitContext) -> Vec<PackedShare> {
+pub async fn randbit(
+    id: ProtocolID,
+    share_coeffs: Arc<GFMatrix>,
+    context: RandBitContext,
+) -> Vec<PackedShare> {
     let chan = context.net_builder.channel(&id).await;
-    let shares = {
+    let shares: Vec<_> = {
         let mut rng = thread_rng();
         let secrets: Vec<_> = (0..context.l)
             .map(|_| {
@@ -148,7 +154,12 @@ pub async fn randbit(id: ProtocolID, context: RandBitContext) -> Vec<PackedShare
                 }
             })
             .collect();
-        context.pss.share(&secrets, context.gf.as_ref(), &mut rng)
+        context.pss.share_using_coeffs(
+            secrets,
+            share_coeffs.as_ref(),
+            context.gf.as_ref(),
+            &mut rng,
+        )
     };
 
     for (i, share) in shares.into_iter().enumerate() {
@@ -166,11 +177,12 @@ pub async fn randbit(id: ProtocolID, context: RandBitContext) -> Vec<PackedShare
         .map(|d| context.gf.deserialize_element(&d))
         .collect();
 
-    context
-        .bin_super_inv
-        .iter()
-        .map(|row| utils::iprod(row.iter(), sent_shares.iter(), context.gf.as_ref()))
-        .collect()
+    utils::matrix_vector_prod(
+        context.bin_super_inv.as_ref(),
+        &sent_shares,
+        context.gf.as_ref(),
+    )
+    .collect()
 }
 
 pub async fn lpn_error(

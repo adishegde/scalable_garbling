@@ -42,8 +42,8 @@ fn pack_circuit() {
     let pcirc = circ.pack(4);
 
     assert_eq!(pcirc.gates().len(), 111);
-    assert_eq!(pcirc.inputs().len(), 2);
-    assert_eq!(pcirc.outputs().len(), 1);
+    assert_eq!(pcirc.inputs().len(), 32);
+    assert_eq!(pcirc.outputs().len(), 16);
     assert_eq!(pcirc.num_wires(), 567);
     assert_eq!(pcirc.gates_per_block(), 4);
 }

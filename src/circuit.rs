@@ -25,13 +25,27 @@ pub struct Circuit {
     num_wires: u32,
 }
 
-#[derive(Clone)]
-pub enum PackedGate {
-    Xor(Vec<GateInfo<2>>),
-    And(Vec<GateInfo<2>>),
-    Inv(Vec<GateInfo<1>>),
+pub struct PackedGateInfo<const N: usize> {
+    pub inp: [Vec<WireID>; N],
+    pub out: Vec<WireID>,
 }
 
+impl<const N: usize> PackedGateInfo<N> {
+    fn from(gates: &[GateInfo<N>]) -> Self {
+        let inp = core::array::from_fn(|i| gates.iter().map(|g| g.inp[i]).collect());
+        let out = gates.iter().map(|g| g.out).collect();
+
+        PackedGateInfo { inp, out }
+    }
+}
+
+pub enum PackedGate {
+    Xor(PackedGateInfo<2>),
+    And(PackedGateInfo<2>),
+    Inv(PackedGateInfo<1>),
+}
+
+// Inputs and outputs are also packed into blocks of `gates_per_block`.
 pub struct PackedCircuit {
     gates: Vec<PackedGate>,
     inputs: Vec<Vec<WireID>>,
@@ -199,23 +213,34 @@ impl Circuit {
 
         let gates: Vec<_> = g_and
             .chunks(gates_per_block as usize)
-            .map(|x| PackedGate::And(x.to_vec()))
+            .map(|x| PackedGate::And(PackedGateInfo::from(x)))
             .chain(
                 g_xor
                     .chunks(gates_per_block as usize)
-                    .map(|x| PackedGate::Xor(x.to_vec())),
+                    .map(|x| PackedGate::Xor(PackedGateInfo::from(x))),
             )
             .chain(
                 g_inv
                     .chunks(gates_per_block as usize)
-                    .map(|x| PackedGate::Inv(x.to_vec())),
+                    .map(|x| PackedGate::Inv(PackedGateInfo::from(x))),
             )
             .collect();
 
+        let flattend_and_partition = |v: Vec<Vec<_>>| {
+            let flattened: Vec<_> = v.into_iter().flatten().collect();
+            flattened
+                .chunks(gates_per_block as usize)
+                .map(|x| x.to_vec())
+                .collect()
+        };
+
+        let inputs = flattend_and_partition(self.inputs);
+        let outputs = flattend_and_partition(self.outputs);
+
         PackedCircuit {
             gates,
-            inputs: self.inputs,
-            outputs: self.outputs,
+            inputs,
+            outputs,
             num_wires: self.num_wires,
             gates_per_block,
         }

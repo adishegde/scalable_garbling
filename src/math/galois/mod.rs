@@ -125,7 +125,7 @@ impl GF {
 /// These are constructed using the respective galois field instances.
 /// The implemented operations assume that input field elements belong to the same field.
 /// The behaviour is undefined when inputs belong to different fields.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GFElement {
     value: u32,
     width: u8,

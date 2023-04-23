@@ -131,14 +131,12 @@ pub async fn trans(
         let secrets = transform.f.as_ref()(&secrets);
         let shares = {
             let mut rng = rand::thread_rng();
-            let mut shares: Vec<_> = (0..context.t).map(|_| context.gf.rand(&mut rng)).collect();
-            let points: Vec<_> = secrets.iter().chain(shares.iter()).copied().collect();
-            shares.extend(utils::matrix_vector_prod(
-                &transform.share,
-                &points,
+            context.pss.share_using_coeffs(
+                secrets,
+                transform.share.as_ref(),
                 context.gf.as_ref(),
-            ));
-            shares
+                &mut rng,
+            )
         };
 
         for (i, share) in shares.into_iter().enumerate() {
@@ -178,6 +176,10 @@ impl RandSharingTransform {
 
         // Compute coefficients to interpolate polynomials to old_pos and new_pos.
         for ((opos, npos), trans) in old_pos.iter().zip(new_pos.iter()).zip(f_trans.iter()) {
+            // Require positions to be of length `l`.
+            debug_assert_eq!(opos.len(), l);
+            debug_assert_eq!(npos.len(), l);
+
             coeffs_list_n.push(pss.share_coeffs_n(opos, gf));
 
             // The matrix to compute the shares should also incorporate the underlying

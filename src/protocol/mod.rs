@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod core;
+pub mod garble;
 pub mod network;
 pub mod preproc;
 
