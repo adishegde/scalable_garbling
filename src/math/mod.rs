@@ -10,6 +10,20 @@ use galois::{GFElement, GFMatrix, GF};
 // Compute lagrange coefficients for interpolating a polynomial defined by evaluations at `cpos`
 // to evaluations at `npos`.
 pub fn lagrange_coeffs(cpos: &[GFElement], npos: &[GFElement], gf: &GF) -> GFMatrix {
+    #[cfg(debug_assertions)]
+    {
+        let num_unique = |v: &[GFElement]| {
+            let mut v = v.to_vec();
+            v.sort_unstable();
+            v.dedup();
+            v.len()
+        };
+
+        // cpos and npos should not have any repetition.
+        assert_eq!(num_unique(cpos), cpos.len());
+        assert_eq!(num_unique(npos), npos.len());
+    }
+
     let gf_one = gf.one();
     let gf_zero = gf.zero();
 
@@ -55,6 +69,8 @@ pub fn lagrange_coeffs(cpos: &[GFElement], npos: &[GFElement], gf: &GF) -> GFMat
 }
 
 pub fn super_inv_matrix(num_inp: usize, num_out: usize, gf: &GF) -> GFMatrix {
+    debug_assert!(num_inp >= num_out);
+
     let mut matrix = Vec::with_capacity(num_out);
     matrix.push(vec![gf.one(); num_inp]);
 

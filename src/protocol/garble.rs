@@ -6,6 +6,14 @@ use crate::math::galois::{GFElement, GF};
 use crate::sharing::{PackedShare, PackedSharing};
 use std::collections::HashMap;
 
+fn wires_to_pos(wires: &[WireID], pss: &PackedSharing, gf: &GF) -> Vec<GFElement> {
+    let offset = pss.pos_offset(gf);
+    let mut pos: Vec<_> = wires.iter().map(|w| offset + gf.get(*w)).collect();
+    pos.sort_unstable();
+    pos.dedup();
+    pos
+}
+
 struct WireSelector {
     lookup: HashMap<WireID, usize>,
     // This is a bit unweildy but essentially is a list of coefficients to select secrets from the
@@ -76,15 +84,14 @@ impl WireSelector {
             acc
         };
 
-        let gen_coeffs_for_block = |mut wires: Vec<WireID>| -> Vec<_> {
-            wires.sort_unstable();
-            wires.dedup();
-            let wires: Vec<_> = wires.iter().map(|i| gf.get(*i)).collect();
+        let gen_coeffs_for_block = |wires: &[WireID]| -> Vec<_> {
+            let pos = wires_to_pos(wires, pss, gf);
 
-            let coeffs = pss.const_coeffs(&wires, id, gf);
-            identity_matrix[..wires.len()]
+            // Embed each row of the pos.len() order identity matrix into a share.
+            let coeffs = pss.const_coeffs(&pos, id, gf);
+            identity_matrix[..pos.len()]
                 .iter()
-                .map(|r| math::utils::iprod(&coeffs, r, gf))
+                .map(|r| math::utils::iprod(&coeffs, &r[..pos.len()], gf))
                 .collect()
         };
 
@@ -94,18 +101,18 @@ impl WireSelector {
             match gate {
                 PackedGate::Xor(ginf) => {
                     coeffs.push(vec![
-                        gen_coeffs_for_block(ginf.inp[0].clone()),
-                        gen_coeffs_for_block(ginf.inp[1].clone()),
+                        gen_coeffs_for_block(&ginf.inp[0]),
+                        gen_coeffs_for_block(&ginf.inp[1]),
                     ]);
                 }
                 PackedGate::And(ginf) => {
                     coeffs.push(vec![
-                        gen_coeffs_for_block(ginf.inp[0].clone()),
-                        gen_coeffs_for_block(ginf.inp[1].clone()),
+                        gen_coeffs_for_block(&ginf.inp[0]),
+                        gen_coeffs_for_block(&ginf.inp[1]),
                     ]);
                 }
                 PackedGate::Inv(ginf) => {
-                    coeffs.push(vec![gen_coeffs_for_block(ginf.inp[0].clone())]);
+                    coeffs.push(vec![gen_coeffs_for_block(&ginf.inp[0])]);
                 }
             }
         }
@@ -123,6 +130,8 @@ impl WireSelector {
         let coeffs_list = &self.coeffs[*self.lookup.get(&ginf.out[0]).unwrap()];
 
         for i in 0..N {
+            // NOTE: This uses the internals of how wires_to_pos is implemented. Any changes to
+            // the function should also be reflected here.
             let mut wires = ginf.inp[i].clone();
             wires.sort_unstable();
             wires.dedup();
@@ -138,100 +147,86 @@ impl WireSelector {
 pub struct GarbleContext {
     transforms: Vec<RandSharingTransform>,
     circ: PackedCircuit,
-    mpc: MPCContext,
+    selector: WireSelector,
 }
 
 impl GarbleContext {
     pub fn new(circ: PackedCircuit, context: MPCContext) -> Self {
+        let selector =
+            WireSelector::new(context.id, &circ, context.pss.as_ref(), context.gf.as_ref());
+
         Self {
             transforms: Self::compute_transforms(&circ, &context),
             circ,
-            mpc: context,
+            selector,
         }
     }
 
     fn compute_transforms(circ: &PackedCircuit, context: &MPCContext) -> Vec<RandSharingTransform> {
-        // Default positions.
-        let def_pos = context.pss.default_pos(context.gf.as_ref());
-
-        let offset = context.pss.pos_offset(context.gf.as_ref());
-        let wires_to_pos = |wires: &[WireID]| -> Vec<GFElement> {
-            wires.iter().map(|x| offset + context.gf.get(*x)).collect()
-        };
-
-        let mut pos_list = Vec::new();
+        let mut wires_list = Vec::new();
         for gate in circ.gates() {
             match gate {
                 PackedGate::Xor(ginf) => {
-                    pos_list.push((wires_to_pos(&ginf.inp[0]), wires_to_pos(&ginf.out)));
-                    pos_list.push((wires_to_pos(&ginf.inp[1]), wires_to_pos(&ginf.out)));
+                    wires_list.push((ginf.inp[0].clone(), ginf.out.clone()));
+                    wires_list.push((ginf.inp[1].clone(), ginf.out.clone()));
                 }
                 PackedGate::And(ginf) => {
-                    pos_list.push((wires_to_pos(&ginf.inp[0]), wires_to_pos(&ginf.out)));
-                    pos_list.push((wires_to_pos(&ginf.inp[1]), wires_to_pos(&ginf.out)));
+                    wires_list.push((ginf.inp[0].clone(), ginf.out.clone()));
+                    wires_list.push((ginf.inp[1].clone(), ginf.out.clone()));
                 }
                 PackedGate::Inv(ginf) => {
-                    pos_list.push((wires_to_pos(&ginf.inp[0]), wires_to_pos(&ginf.out)));
+                    wires_list.push((ginf.inp[0].clone(), ginf.out.clone()));
                 }
             }
         }
 
         let mut transforms = Vec::new();
+        let offset = context.pss.pos_offset(context.gf.as_ref());
 
-        for pos_batch in pos_list.chunks(context.l) {
+        for wires_block in wires_list.chunks(context.l) {
             let mut f_trans: Vec<Box<dyn Fn(&[PackedShare]) -> Vec<PackedShare>>> = Vec::new();
-            let mut opos_batch = Vec::new();
-            let mut npos_batch = Vec::new();
+            let mut opos_block = Vec::new();
+            let mut npos_block = Vec::new();
 
-            for (inp_wires, npos) in pos_batch {
-                // Remove repetitions in wire IDs.
-                // The linear map will ensure repetitions are handled correctly.
-                let mut opos = inp_wires.clone();
-                opos.sort_unstable();
-                opos.dedup();
-
-                if opos.len() < context.l {
-                    opos.extend_from_slice(&def_pos[opos.len()..context.l]);
-                }
+            for (inp_wires, out_wires) in wires_block {
+                let mut inp_dedup = inp_wires.clone();
+                inp_dedup.sort_unstable();
+                inp_dedup.dedup();
 
                 // Build the transform that orders and repeats secrets correctly.
-                let mut wire_lookup = HashMap::new();
-                for (i, w) in opos.iter().enumerate() {
-                    wire_lookup.insert(*w, i);
-                }
-
-                let output = inp_wires.clone();
-                let vec_len = context.l;
-                let f = move |v: &[GFElement]| -> Vec<GFElement> {
-                    let mut res: Vec<_> = output
-                        .iter()
-                        .map(|w| v[*wire_lookup.get(w).unwrap()])
-                        .collect();
-
-                    // Ensure that the output vector is of length `l` by concatenating appropriate
-                    // length suffix of `v`.
-                    if res.len() < vec_len {
-                        res.extend_from_slice(&v[res.len()..vec_len]);
+                let f = {
+                    let mut wire_lookup = HashMap::new();
+                    for (i, w) in inp_dedup.iter().enumerate() {
+                        wire_lookup.insert(*w, i);
                     }
 
-                    res
+                    let inp_wires = inp_wires.clone();
+                    move |v: &[GFElement]| -> Vec<GFElement> {
+                        inp_wires
+                            .iter()
+                            .map(|w| v[*wire_lookup.get(w).unwrap()])
+                            .collect()
+                    }
                 };
 
-                // Ensure that the number of new positions is `l`.
-                let mut npos = npos.clone();
-                if npos.len() < context.l {
-                    npos.extend_from_slice(&opos[npos.len()..context.l]);
-                }
+                let opos: Vec<_> = inp_dedup
+                    .into_iter()
+                    .map(|x| offset + context.gf.get(x))
+                    .collect();
+                let npos = out_wires
+                    .into_iter()
+                    .map(|x| offset + context.gf.get(*x))
+                    .collect();
 
-                opos_batch.push(opos);
+                opos_block.push(opos);
                 f_trans.push(Box::new(f));
-                npos_batch.push(npos);
+                npos_block.push(npos);
             }
 
             transforms.push(RandSharingTransform::new(
                 context.id,
-                &opos_batch,
-                &npos_batch,
+                &opos_block,
+                &npos_block,
                 &f_trans,
                 context.pss.as_ref(),
                 context.gf.as_ref(),

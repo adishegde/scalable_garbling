@@ -171,22 +171,63 @@ impl RandSharingTransform {
         let t: usize = pss.threshold() as usize;
         let l: usize = pss.packing_param() as usize;
 
+        debug_assert_eq!(old_pos.len(), new_pos.len());
+        debug_assert_eq!(new_pos.len(), f_trans.len());
+        debug_assert!(f_trans.len() <= l);
+
         let mut coeffs_list = Vec::with_capacity(l);
         let mut coeffs_list_n = Vec::with_capacity(l);
 
         // Compute coefficients to interpolate polynomials to old_pos and new_pos.
         for ((opos, npos), trans) in old_pos.iter().zip(new_pos.iter()).zip(f_trans.iter()) {
-            // Require positions to be of length `l`.
-            debug_assert_eq!(opos.len(), l);
-            debug_assert_eq!(npos.len(), l);
+            debug_assert!(opos.len() <= l);
+            debug_assert!(npos.len() <= l);
 
-            coeffs_list_n.push(pss.share_coeffs_n(opos, gf));
+            // If opos.len() is not l, then in each row insert 0 for positions corresponding to the
+            // missing positions.
+            let coeffs_n: GFMatrix = pss
+                .share_coeffs_n(opos, gf)
+                .into_iter()
+                .map(|r| {
+                    if opos.len() != l {
+                        r[..opos.len()]
+                            .iter()
+                            .cloned()
+                            .chain(std::iter::repeat(gf.zero()))
+                            .take(l)
+                            .chain(r[opos.len()..].iter().cloned())
+                            .collect()
+                    } else {
+                        r
+                    }
+                })
+                .collect();
+            coeffs_list_n.push(coeffs_n);
+
+            // If npos.len() is not l, then in each row insert 0 for positions corresponding to the
+            // missing positions.
+            let coeffs: GFMatrix = pss
+                .share_coeffs(npos, gf)
+                .into_iter()
+                .map(|r| {
+                    if npos.len() != l {
+                        r[..npos.len()]
+                            .iter()
+                            .cloned()
+                            .chain(std::iter::repeat(gf.zero()))
+                            .take(l)
+                            .chain(r[npos.len()..].iter().cloned())
+                            .collect()
+                    } else {
+                        r
+                    }
+                })
+                .collect();
 
             // The matrix to compute the shares should also incorporate the underlying
             // transformation on the secrets.
             // We first compute the coefficient matrix, then multiply it with the matrix
             // corresponding to the linear transformation.
-            let coeffs = pss.share_coeffs(npos, gf);
             let mut coeffs_trans = coeffs.clone();
 
             let mut inp = vec![gf.zero(); l];
@@ -198,9 +239,11 @@ impl RandSharingTransform {
                     inp[c - 1] = gf.zero();
                 }
 
-                // Multiply the coefficient matrix with the c-th column of the linear
-                // transformation matrix.
-                // The c-th column of the coefficient matrix is then replaced with the answer.
+                debug_assert_eq!(trans(&inp).len(), npos.len());
+
+                // Multiply npos.len() width left submatrix of the coefficient matrix with the
+                // c-th column of the linear transformation matrix.
+                // The c-th column of the coefficient is then replaced with the product.
                 for (r, v) in utils::matrix_vector_prod(&coeffs, &trans(&inp), gf).enumerate() {
                     coeffs_trans[r][c] = v;
                 }

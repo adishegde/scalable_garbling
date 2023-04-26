@@ -39,6 +39,9 @@ pub struct PackedSharing {
 impl PackedSharing {
     /// Creates a new packed sharing instance with a fixed threshold `t` and packing parameter `l`.
     pub fn new(n: u32, t: u32, l: u32, gf: &GF) -> Self {
+        debug_assert!(2 * t + 2 * l - 1 <= n);
+        debug_assert!(l + n < gf.order());
+
         // Secrets correspond to evaluations at `[0, ..., l - 1]`.
         // Shares correspond to evaluations at `[l, ..., l + n - 1]`.
         // The sharing polynomial is defined by `[0, ..., l + t - 1]` which allows setting the
@@ -166,6 +169,8 @@ impl PackedSharing {
     ///
     /// `shares` should be of length `n` but this is not checked within the method.
     pub fn semihon_recon(&self, shares: &[PackedShare], gf: &GF) -> Vec<GFElement> {
+        debug_assert!(shares.len() >= self.t + self.l);
+
         matrix_vector_prod(
             &self.recon_coeffs[..self.l],
             &shares[(self.n - self.t - self.l)..],
@@ -201,6 +206,8 @@ impl PackedSharing {
     /// Coefficients to interpolate secrets at position pos and shares of the first `t`
     /// parties, to the shares of the remaining `n - t` parties.
     pub fn share_coeffs(&self, pos: &[GFElement], gf: &GF) -> GFMatrix {
+        // No restrictions on the lenght of pos except that all values should be unique and should
+        // not intersect with party's share eval points.
         let l: u32 = self.l.try_into().unwrap();
         let t: u32 = self.t.try_into().unwrap();
         let n: u32 = self.n.try_into().unwrap();
@@ -221,11 +228,8 @@ impl PackedSharing {
         gf: &GF,
         rng: &mut R,
     ) -> Vec<PackedShare> {
-        let num_fixed_shares = coeffs[0].len() - self.l;
+        let num_fixed_shares = coeffs[0].len() - secrets.len();
         let mut shares: Vec<_> = (0..num_fixed_shares).map(|_| gf.rand(rng)).collect();
-
-        // If number of secrets provided is lesser than l, then add random secrets.
-        secrets.extend((0..(self.l - secrets.len())).map(|_| gf.rand(rng)));
 
         secrets.extend(shares.iter().cloned());
         shares.extend(matrix_vector_prod(coeffs, &secrets, gf));
@@ -268,6 +272,7 @@ impl PackedSharing {
     ///
     /// `shares` should be of length `n` but this is not checked within the method.
     pub fn recon_n(&self, shares: &[PackedShare], gf: &GF) -> Vec<GFElement> {
+        debug_assert!(shares.len() == self.n);
         matrix_vector_prod(&self.recon_coeffs_n, &shares, gf).collect()
     }
 
