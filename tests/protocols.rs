@@ -2,6 +2,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use scalable_mpc::math;
 use scalable_mpc::math::galois;
+use scalable_mpc::math::Combination;
 use scalable_mpc::protocol::{core, network, preproc, MPCContext};
 use scalable_mpc::sharing;
 use scalable_mpc::{block_on, spawn};
@@ -261,7 +262,7 @@ fn trans() {
         let rand_secrets: Vec<_> = (0..l).map(|_| gf.rand(&mut rng)).collect();
         let old_pos: Vec<_> = gf.get_range(200..(200 + l)).collect();
         let new_pos: Vec<_> = gf.get_range(300..(300 + l)).collect();
-        let f_trans = |v: &[galois::GFElement]| vec![v[1], v[2], v[1]];
+        let f_trans = Combination::new(vec![1, 2, 1]);
 
         let old_shares = {
             let coeffs = pss.share_coeffs(&old_pos, gf.as_ref());
@@ -273,13 +274,13 @@ fn trans() {
         };
         let random = {
             let coeffs = pss.share_coeffs(&new_pos, gf.as_ref());
-            pss.share_using_coeffs(f_trans(&rand_secrets), &coeffs, gf.as_ref(), &mut rng)
+            pss.share_using_coeffs(f_trans.apply(&rand_secrets), &coeffs, gf.as_ref(), &mut rng)
         };
 
         let mut handles = Vec::new();
         for (i, context) in contexts.into_iter().enumerate() {
             let transform =
-                core::SharingTransform::new(&old_pos, &new_pos, Box::new(f_trans), &pss, &gf);
+                core::SharingTransform::new(&old_pos, &new_pos, f_trans.clone(), &pss, &gf);
 
             handles.push(spawn(core::trans(
                 proto_id.clone(),
@@ -300,7 +301,7 @@ fn trans() {
         let out_secrets: Vec<_> =
             math::utils::matrix_vector_prod(&recon_coeffs, &out_shares, gf.as_ref()).collect();
 
-        assert_eq!(out_secrets, f_trans(&secrets));
+        assert_eq!(out_secrets, f_trans.apply(&secrets));
     });
 }
 
@@ -317,7 +318,7 @@ fn trans_incomplete_block() {
         let rand_secrets = vec![gf.rand(&mut rng)];
         let old_pos = vec![gf.get(200)];
         let new_pos = vec![gf.get(300), gf.get(301)];
-        let f_trans = |v: &[galois::GFElement]| vec![v[0], v[0]];
+        let f_trans = Combination::new(vec![0, 0]);
 
         let old_shares = {
             let coeffs = pss.share_coeffs(&old_pos, gf.as_ref());
@@ -329,13 +330,13 @@ fn trans_incomplete_block() {
         };
         let random = {
             let coeffs = pss.share_coeffs(&new_pos, gf.as_ref());
-            pss.share_using_coeffs(f_trans(&rand_secrets), &coeffs, gf.as_ref(), &mut rng)
+            pss.share_using_coeffs(f_trans.apply(&rand_secrets), &coeffs, gf.as_ref(), &mut rng)
         };
 
         let mut handles = Vec::new();
         for (i, context) in contexts.into_iter().enumerate() {
             let transform =
-                core::SharingTransform::new(&old_pos, &new_pos, Box::new(f_trans), &pss, &gf);
+                core::SharingTransform::new(&old_pos, &new_pos, f_trans.clone(), &pss, &gf);
 
             handles.push(spawn(core::trans(
                 proto_id.clone(),
@@ -356,7 +357,7 @@ fn trans_incomplete_block() {
         let out_secrets: Vec<_> =
             math::utils::matrix_vector_prod(&recon_coeffs, &out_shares, gf.as_ref()).collect();
 
-        assert_eq!(out_secrets, f_trans(&secrets));
+        assert_eq!(out_secrets, f_trans.apply(&secrets));
     });
 }
 
@@ -380,10 +381,10 @@ fn randtrans() {
             gf.get_range(350..(350 + l)).collect(),
             gf.get_range(325..(325 + l)).collect(),
         ];
-        let f_trans: Vec<Box<dyn Fn(&[sharing::PackedShare]) -> Vec<sharing::PackedShare>>> = vec![
-            Box::new(|v: &[galois::GFElement]| v.to_vec()),
-            Box::new(|v: &[galois::GFElement]| vec![v[2], v[1], v[0]]),
-            Box::new(|v: &[galois::GFElement]| vec![v[2], v[0], v[2]]),
+        let f_trans = vec![
+            Combination::new((0..L).collect()),
+            Combination::new(vec![2, 1, 0]),
+            Combination::new(vec![2, 0, 2]),
         ];
 
         let randoms: Vec<_> = (0..(N + T))
@@ -441,7 +442,7 @@ fn randtrans() {
                 math::utils::matrix_vector_prod(&coeffs, &sharing_n, gf.as_ref()).collect()
             };
 
-            assert_eq!(secrets, f_trans[i](&secrets_n));
+            assert_eq!(secrets, f_trans[i].apply(&secrets_n));
         }
     });
 }
@@ -462,10 +463,7 @@ fn randtrans_incomplete_block() {
             vec![gf.get(300), gf.get(301), gf.get(302)],
             vec![gf.get(325)],
         ];
-        let f_trans: Vec<Box<dyn Fn(&[sharing::PackedShare]) -> Vec<sharing::PackedShare>>> = vec![
-            Box::new(|v: &[galois::GFElement]| vec![v[0], v[0], v[0]]),
-            Box::new(|v: &[galois::GFElement]| vec![v[1]]),
-        ];
+        let f_trans = vec![Combination::new(vec![0, 0, 0]), Combination::new(vec![1])];
 
         let randoms: Vec<_> = (0..(N + T))
             .map(|_| pss.rand(gf.as_ref(), &mut rng))
@@ -527,7 +525,7 @@ fn randtrans_incomplete_block() {
                 math::utils::matrix_vector_prod(&coeffs, &sharing_n, gf.as_ref()).collect()
             };
 
-            assert_eq!(secrets, f_trans[i](&secrets_n));
+            assert_eq!(secrets, f_trans[i].apply(&secrets_n));
         }
     });
 }

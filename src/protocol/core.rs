@@ -3,6 +3,7 @@ use super::network::{Recipient, SendMessage};
 use super::{MPCContext, ProtocolID};
 use crate::math::galois::{GFElement, GFMatrix, GF};
 use crate::math::utils;
+use crate::math::Combination;
 use crate::sharing::{PackedShare, PackedSharing};
 use crate::PartyID;
 use rand;
@@ -79,21 +80,21 @@ pub async fn mult(
 pub struct SharingTransform {
     recon_n: GFMatrix,
     share: GFMatrix,
-    f: Box<dyn Fn(&[PackedShare]) -> Vec<PackedShare> + Send>,
+    f: Combination,
 }
 
 impl SharingTransform {
     pub fn new(
         old_pos: &[GFElement],
         new_pos: &[GFElement],
-        f_trans: Box<dyn Fn(&[PackedShare]) -> Vec<PackedShare> + Send>,
+        f: Combination,
         pss: &PackedSharing,
         gf: &GF,
     ) -> Self {
         Self {
             recon_n: pss.recon_coeffs_n(old_pos, gf),
             share: pss.share_coeffs(new_pos, gf),
-            f: f_trans,
+            f,
         }
     }
 }
@@ -128,7 +129,7 @@ pub async fn trans(
 
         let secrets: Vec<_> =
             utils::matrix_vector_prod(&transform.recon_n, &shares, context.gf.as_ref()).collect();
-        let secrets = transform.f.as_ref()(&secrets);
+        let secrets = transform.f.apply(&secrets);
         let shares = {
             let mut rng = rand::thread_rng();
             context.pss.share_using_coeffs(
@@ -163,7 +164,7 @@ impl RandSharingTransform {
         id: PartyID,
         old_pos: &[Vec<GFElement>],
         new_pos: &[Vec<GFElement>],
-        f_trans: &[Box<dyn Fn(&[PackedShare]) -> Vec<PackedShare>>],
+        f_trans: &[Combination],
         pss: &PackedSharing,
         gf: &GF,
     ) -> Self {
@@ -239,12 +240,13 @@ impl RandSharingTransform {
                     inp[c - 1] = gf.zero();
                 }
 
-                debug_assert_eq!(trans(&inp).len(), npos.len());
+                debug_assert_eq!(trans.apply(&inp).len(), npos.len());
 
                 // Multiply npos.len() width left submatrix of the coefficient matrix with the
                 // c-th column of the linear transformation matrix.
                 // The c-th column of the coefficient is then replaced with the product.
-                for (r, v) in utils::matrix_vector_prod(&coeffs, &trans(&inp), gf).enumerate() {
+                for (r, v) in utils::matrix_vector_prod(&coeffs, &trans.apply(&inp), gf).enumerate()
+                {
                     coeffs_trans[r][c] = v;
                 }
             }

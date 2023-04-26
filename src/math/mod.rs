@@ -1,4 +1,7 @@
+use std::cmp::Eq;
+use std::collections::HashMap;
 use std::fs::File;
+use std::hash::Hash;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -114,4 +117,26 @@ pub fn binary_super_inv_matrix(path: &Path, gf: &GF) -> GFMatrix {
     }
 
     matrix
+}
+
+#[derive(Clone)]
+pub struct Combination(Vec<usize>);
+
+impl Combination {
+    pub fn new(map: Vec<usize>) -> Self {
+        Self(map)
+    }
+
+    pub fn from_instance<T: Hash + Eq>(inp: &[T], out: &[T]) -> Self {
+        let mut lookup = HashMap::new();
+        for (i, v) in inp.iter().enumerate() {
+            lookup.insert(v, i);
+        }
+
+        Self(out.iter().map(|v| *lookup.get(v).unwrap()).collect())
+    }
+
+    pub fn apply<T: Copy>(&self, v: &[T]) -> Vec<T> {
+        self.0.iter().map(|&i| v[i]).collect()
+    }
 }
