@@ -1,9 +1,10 @@
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+use scalable_mpc::circuit::Circuit;
 use scalable_mpc::math;
 use scalable_mpc::math::galois;
 use scalable_mpc::math::Combination;
-use scalable_mpc::protocol::{core, network, preproc, MPCContext};
+use scalable_mpc::protocol::{core, garble, network, preproc, MPCContext};
 use scalable_mpc::sharing;
 use scalable_mpc::{block_on, spawn};
 use serial_test::serial;
@@ -15,6 +16,8 @@ const N: usize = 16;
 const T: usize = 5;
 const L: usize = 3;
 const LPN_TAU: usize = 4;
+const LPN_KEY_LEN: usize = 5;
+const LPN_MSSG_LEN: usize = 7;
 
 async fn setup() -> (
     Arc<galois::GF>,
@@ -42,6 +45,8 @@ async fn setup() -> (
             t: T,
             l: L,
             lpn_tau: LPN_TAU,
+            lpn_key_len: LPN_KEY_LEN,
+            lpn_mssg_len: LPN_MSSG_LEN,
             gf,
             pss,
             net_builder: net,
@@ -526,6 +531,60 @@ fn randtrans_incomplete_block() {
             };
 
             assert_eq!(secrets, f_trans[i].apply(&secrets_n));
+        }
+    });
+}
+
+#[test]
+#[serial]
+fn garble() {
+    block_on(async {
+        let circ = {
+            let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            path.push("tests/data/sub64.txt");
+            let circ = Circuit::from_bristol_fashion(&path);
+            circ.pack(L as u32)
+        };
+
+        let (_, _, contexts) = setup().await;
+
+        let mut handles = Vec::new();
+        for (i, context) in contexts.into_iter().enumerate() {
+            let circ = circ.clone();
+            let preproc = preproc::PreProc::dummy(i.try_into().unwrap(), 200, &circ, &context);
+            let context = Arc::new(garble::GarbleContextData::new(circ, context));
+            handles.push(spawn(async move {
+                garble::garble(b"".to_vec(), preproc, context).await
+            }))
+        }
+
+        for handle in handles {
+            let gc = handle.await;
+
+            assert_eq!(gc.gates.len(), circ.gates().len());
+
+            for gate in gc.gates {
+                match gate {
+                    garble::GarbledGate::And(table) => {
+                        assert_eq!(table.ctxs.len(), 4);
+                        for ctx in table.ctxs {
+                            assert_eq!(ctx.len(), LPN_MSSG_LEN);
+                        }
+                    }
+                    garble::GarbledGate::Xor(table) => {
+                        assert_eq!(table.ctxs.len(), 4);
+                        for ctx in table.ctxs {
+                            assert_eq!(ctx.len(), LPN_MSSG_LEN);
+                        }
+                    }
+                    garble::GarbledGate::Inv(table) => {
+                        assert_eq!(table.ctxs.len(), 2);
+                        for ctx in table.ctxs {
+                            assert_eq!(ctx.len(), LPN_MSSG_LEN);
+                        }
+                    }
+                }
+            }
         }
     });
 }

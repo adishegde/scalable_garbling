@@ -118,8 +118,8 @@ impl PackedSharing {
     /// Gives the offset for evaluations points i.e., application specific logic can securely embed
     /// a secret starting from this offset since everything before the offset is used by the
     /// sharing scheme and has special semantics.
-    pub fn pos_offset(&self, gf: &GF) -> GFElement {
-        gf.get((self.l + self.n).try_into().unwrap())
+    pub fn pos_offset(&self) -> u32 {
+        (self.l + self.n).try_into().unwrap()
     }
 
     /// Secret shares over a `t + l - 1` degree polynomial.

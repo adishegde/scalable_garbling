@@ -8,6 +8,7 @@ use crate::sharing::{PackedShare, PackedSharing};
 use crate::PartyID;
 use rand;
 use seahash::hash;
+use std::sync::Arc;
 
 pub async fn reduce_degree(
     id: ProtocolID,
@@ -77,10 +78,11 @@ pub async fn mult(
 /// Describes a sharing transformation.
 /// Given a sharing with secrets at a particular position in the underyling polynomial, the
 /// transformed sharing will have the secrets at a different set of positions.
+#[derive(Clone)]
 pub struct SharingTransform {
-    recon_n: GFMatrix,
-    share: GFMatrix,
-    f: Combination,
+    recon_n: Arc<GFMatrix>,
+    share: Arc<GFMatrix>,
+    f: Arc<Combination>,
 }
 
 impl SharingTransform {
@@ -92,9 +94,9 @@ impl SharingTransform {
         gf: &GF,
     ) -> Self {
         Self {
-            recon_n: pss.recon_coeffs_n(old_pos, gf),
-            share: pss.share_coeffs(new_pos, gf),
-            f,
+            recon_n: Arc::new(pss.recon_coeffs_n(old_pos, gf)),
+            share: Arc::new(pss.share_coeffs(new_pos, gf)),
+            f: Arc::new(f),
         }
     }
 }
@@ -154,9 +156,10 @@ pub async fn trans(
     share - random
 }
 
+#[derive(Clone)]
 pub struct RandSharingTransform {
-    share: GFMatrix,
-    share_n: GFMatrix,
+    share: Arc<GFMatrix>,
+    share_n: Arc<GFMatrix>,
 }
 
 impl RandSharingTransform {
@@ -308,6 +311,9 @@ impl RandSharingTransform {
             coeff_shares
         };
 
+        let share = Arc::new(share);
+        let share_n = Arc::new(share_n);
+
         Self { share, share_n }
     }
 }
@@ -319,6 +325,9 @@ pub async fn randtrans(
     transform: RandSharingTransform,
     context: MPCContext,
 ) -> Vec<(PackedShare, PackedShare)> {
+    debug_assert_eq!(randoms.len(), context.n + context.t);
+    debug_assert_eq!(zeros.len(), 2 * context.n);
+
     let chan = context.net_builder.channel(&id).await;
 
     let secrets = &randoms[..context.l];

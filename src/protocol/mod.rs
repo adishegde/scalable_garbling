@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod core;
+pub mod garble;
 pub mod network;
 pub mod preproc;
 
@@ -163,11 +164,13 @@ impl<S, R> Clone for ProtoChannelBuilder<S, R> {
 
 #[derive(Clone)]
 pub struct MPCContext {
-    pub id: PartyID,    // ID of party
-    pub n: usize,       // Number of parties
-    pub t: usize,       // Threshold of corrupt parties
-    pub l: usize,       // Packing parameter i.e., number of secrets per share
-    pub lpn_tau: usize, // LPN error parameter; Bernoulli errors with bias 2^{-lnp_tau}
+    pub id: PartyID,         // ID of party
+    pub n: usize,            // Number of parties
+    pub t: usize,            // Threshold of corrupt parties
+    pub l: usize,            // Packing parameter i.e., number of secrets per share
+    pub lpn_tau: usize,      // LPN error parameter; Bernoulli errors with bias 2^{-lnp_tau}
+    pub lpn_key_len: usize,  // LPN key length
+    pub lpn_mssg_len: usize, // LPN message/expanded length
     pub gf: Arc<GF>,
     pub pss: Arc<PackedSharing>,
     pub net_builder: network::NetworkChannelBuilder,

@@ -17,6 +17,7 @@ pub enum Gate {
     Inv(GateInfo<1>),
 }
 
+#[derive(Clone)]
 pub struct Circuit {
     // Gates should be topologically ordered so that they can be evaluated in sequence.
     gates: Vec<Gate>,
@@ -25,6 +26,7 @@ pub struct Circuit {
     num_wires: u32,
 }
 
+#[derive(Clone)]
 pub struct PackedGateInfo<const N: usize> {
     pub inp: [Vec<WireID>; N],
     pub out: Vec<WireID>,
@@ -39,6 +41,7 @@ impl<const N: usize> PackedGateInfo<N> {
     }
 }
 
+#[derive(Clone)]
 pub enum PackedGate {
     Xor(PackedGateInfo<2>),
     And(PackedGateInfo<2>),
@@ -46,6 +49,7 @@ pub enum PackedGate {
 }
 
 // Inputs and outputs are also packed into blocks of `gates_per_block`.
+#[derive(Clone)]
 pub struct PackedCircuit {
     gates: Vec<PackedGate>,
     inputs: Vec<Vec<WireID>>,

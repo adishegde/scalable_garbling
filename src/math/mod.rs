@@ -119,6 +119,29 @@ pub fn binary_super_inv_matrix(path: &Path, gf: &GF) -> GFMatrix {
     matrix
 }
 
+pub fn rs_gen_mat(mssg_len: usize, code_len: usize, gf: &GF) -> GFMatrix {
+    debug_assert!(mssg_len <= code_len);
+
+    let mut matrix = Vec::with_capacity(code_len);
+    matrix.push(vec![gf.one(); mssg_len]);
+
+    for i in 2..(code_len + 1) {
+        let val = gf.get(i.try_into().unwrap());
+        let mut row = Vec::with_capacity(mssg_len);
+        row.push(gf.one());
+        let mut prev = gf.one();
+
+        for _ in 1..mssg_len {
+            prev *= val;
+            row.push(prev);
+        }
+
+        matrix.push(row);
+    }
+
+    matrix
+}
+
 #[derive(Clone)]
 pub struct Combination(Vec<usize>);
 
