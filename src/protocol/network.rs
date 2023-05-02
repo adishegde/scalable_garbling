@@ -9,6 +9,7 @@ use smol::net::{TcpListener, TcpStream};
 use smol::stream::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
+use vint64;
 
 #[derive(Clone, Copy)]
 pub enum Recipient {
@@ -361,16 +362,14 @@ async fn send_router(
 
 // Send data over stream for protocol with ID proto_id.
 async fn send_to_party(proto_id: &ProtocolID, data: &[u8], mut stream: TcpStream) {
-    let mssg_len: u8 = (proto_id.len() + data.len() + 1)
-        .try_into()
-        .expect("Message length to be at most 255 bytes.");
+    let mssg_len = proto_id.len() + data.len() + 1;
     let id_len: u8 = proto_id
         .len()
         .try_into()
         .expect("Protocol ID to be at most 255 bytes.");
 
-    let mut mssg = Vec::with_capacity(usize::from(mssg_len) + 1);
-    mssg.push(mssg_len);
+    let mut mssg = Vec::with_capacity(usize::from(mssg_len) + vint64::encoded_len(mssg_len as u64));
+    mssg.extend_from_slice(vint64::encode(mssg_len as u64).as_ref());
     mssg.push(id_len);
     mssg.extend_from_slice(&proto_id);
     mssg.extend_from_slice(&data);
@@ -389,10 +388,20 @@ async fn party_receive_router(
     channel_builder: NetworkChannelBuilder,
     stats: Stats,
 ) {
-    let mut byte = [0; 1];
+    let mut bytes = [0; 9];
 
-    while let Ok(_) = incoming.read_exact(&mut byte).await {
-        let mssg_len = usize::from(u8::from_be_bytes(byte));
+    while let Ok(_) = incoming.read_exact(&mut bytes[..1]).await {
+        let mssg_len = {
+            let enc_len = vint64::decoded_len(bytes[0]);
+            if enc_len != 1 {
+                incoming
+                    .read_exact(&mut bytes[1..enc_len])
+                    .await
+                    .expect("TCP stream is readable.");
+            }
+            vint64::decode(&mut &bytes[..enc_len]).unwrap() as usize
+        };
+
         let mut mssg = vec![0; mssg_len];
         incoming
             .read_exact(&mut mssg)

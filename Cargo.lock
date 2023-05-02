@@ -991,6 +991,7 @@ dependencies = [
  "sha2",
  "smol",
  "smolscale",
+ "vint64",
 ]
 
 [[package]]
@@ -1308,6 +1309,12 @@ name = "version_check"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
+
+[[package]]
+name = "vint64"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0b3dd7987b5df43ec8f5a1050d608b4d9c78a5785c70549635870b9cad9442c"
 
 [[package]]
 name = "waker-fn"
