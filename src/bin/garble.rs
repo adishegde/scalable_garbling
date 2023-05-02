@@ -4,10 +4,40 @@ use scalable_mpc::circuit::{Circuit, PackedCircuit};
 use scalable_mpc::protocol::{garble, network, preproc, MPCContext};
 use scalable_mpc::{math, sharing, PartyID};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+
+struct Stats {
+    time: Instant,
+    comm: Vec<(u64, u64)>,
+}
+
+impl Stats {
+    async fn now(stats: &network::Stats, n: u32) -> Self {
+        let mut comm = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            comm.push(stats.party(i.try_into().unwrap()).await);
+        }
+
+        Self {
+            time: Instant::now(),
+            comm,
+        }
+    }
+
+    async fn elapsed(&self, stats: &network::Stats) -> (u64, Vec<(u64, u64)>) {
+        let time: u64 = self.time.elapsed().as_millis().try_into().unwrap();
+        let mut comm = Vec::with_capacity(self.comm.len());
+        for i in 0..self.comm.len() {
+            let pcom = stats.party(i.try_into().unwrap()).await;
+            comm.push((pcom.0 - self.comm[i].0, pcom.1 - self.comm[i].1));
+        }
+
+        (time, comm)
+    }
+}
 
 /// Benchmark garbling phase.
 #[derive(FromArgs)]
@@ -48,6 +78,10 @@ struct Garble {
     #[argh(option, default = "721")]
     lpn_mssg_len: usize,
 
+    /// number of repetitions
+    #[argh(option, default = "1")]
+    reps: usize,
+
     /// file to save benchmark data
     #[argh(option)]
     save: Option<String>,
@@ -56,6 +90,8 @@ struct Garble {
 async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
     let n: u32 = ipaddrs.len().try_into().unwrap();
 
+    println!("--- Party {} ---", opts.id);
+
     let gf = Arc::new(math::galois::GF::new(opts.gf_width).unwrap());
     let pss = Arc::new(sharing::PackedSharing::new(
         n,
@@ -63,7 +99,9 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
         opts.packing_param,
         gf.as_ref(),
     ));
+
     let (stats, net) = network::setup_tcp_network(opts.id, &ipaddrs).await;
+    println!("Connected to network.");
 
     let mpcctx = MPCContext {
         id: opts.id,
@@ -79,6 +117,8 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
     };
 
     let preproc = preproc::PreProc::dummy(opts.id, 200, &circ, &mpcctx);
+    println!("Computed dummy preprocessing.");
+    std::io::stdout().flush().unwrap();
 
     let mut bench_data = json::JsonValue::new_object();
 
@@ -86,34 +126,46 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
         let start = Instant::now();
         let context = garble::GarbleContextData::new(circ, mpcctx);
         let comp_time: u64 = start.elapsed().as_millis().try_into().unwrap();
-        bench_data["comp_time"] = comp_time.into();
+        bench_data["onetime_comp"] = comp_time.into();
         Arc::new(context)
     };
+    println!();
+    println!("Completed onetime circuit dependent computation.");
+    println!("Time: {} ms", bench_data["onetime_comp"]);
+    std::io::stdout().flush().unwrap();
 
-    let start = Instant::now();
-    garble::garble(b"".to_vec(), preproc, context).await;
-    let comp_time: u64 = start.elapsed().as_millis().try_into().unwrap();
-    bench_data["runtime"] = comp_time.into();
+    let bench_proto = b"benchmark communication protocol".to_vec();
+    let chan = net.channel(&bench_proto).await;
+    bench_data["garbling"] = json::JsonValue::new_array();
 
-    bench_data["comms"] = json::JsonValue::new_array();
-    let mut total_comm = 0;
-    for i in 0..(n.try_into().unwrap()) {
-        let (net_data, proto_data) = stats.party(i).await;
-        total_comm += proto_data;
-        bench_data["comms"]
-            .push(json::array![net_data, proto_data])
+    for i in 0..opts.reps {
+        network::sync(bench_proto.clone(), &chan, n as usize).await;
+        let preproc = preproc.clone();
+        let context = context.clone();
+        let gproto_id = b"".to_vec();
+
+        let start = Stats::now(&stats, n).await;
+        garble::garble(gproto_id, preproc, context).await;
+        let (runtime, comm) = start.elapsed(&stats).await;
+
+        println!();
+        println!("--- Repetition {} ---", i);
+        println!("Runtime: {} ms", runtime);
+        println!(
+            "Communication: {} bytes",
+            comm.iter().map(|(x, _)| *x).sum::<u64>()
+        );
+        std::io::stdout().flush().unwrap();
+
+        bench_data["garbling"]
+            .push(json::object! {
+                time: runtime,
+                comm: comm.into_iter().map(|(x, y)| json::array![x, y]).collect::<Vec<_>>()
+            })
             .unwrap();
     }
 
-    println!("--- Party {} ---", opts.id);
-    println!("One time computation: {} ms", bench_data["comp_time"]);
-    println!("Garbling runtime: {} ms", bench_data["runtime"]);
-    println!("Garbling communication: {} bytes", total_comm);
-
     if let Some(save_path) = opts.save {
-        let bench_proto = b"benchmark communication protocol".to_vec();
-
-        let chan = net.channel(&bench_proto).await;
         let data = bench_data.dump().as_bytes().to_vec();
 
         chan.send(network::SendMessage {
@@ -137,7 +189,6 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
                 benchmarks: json::JsonValue::new_array()
             };
 
-            let chan = net.channel(&bench_proto).await;
             network::message_from_each_party(&chan, n as usize)
                 .await
                 .into_iter()

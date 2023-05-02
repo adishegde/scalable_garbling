@@ -7,7 +7,7 @@ use crate::math::galois::{GFMatrix, GF};
 use crate::math::utils;
 use crate::sharing::{PackedShare, PackedSharing};
 use crate::PartyID;
-use rand::{thread_rng, Rng, SeedableRng};
+use rand::{thread_rng, Rng};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -203,6 +203,7 @@ pub async fn lpn_error(
     prod
 }
 
+#[derive(Clone)]
 pub struct PreProc {
     // Mask for each packed gate
     pub masks: Vec<PackedShare>,
@@ -219,7 +220,7 @@ impl PreProc {
         let num_gate_blocks = circ.gates().len();
         let num_blocks = num_circ_inp_blocks + num_gate_blocks;
 
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut rng = rand::rngs::mock::StepRng::new(seed, 1);
 
         let masks = (0..num_blocks)
             .map(|_| {

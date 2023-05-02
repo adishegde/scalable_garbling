@@ -79,7 +79,7 @@ impl GF {
     /// Deserialize a field element.
     pub fn deserialize_element(&self, bytes: &[u8]) -> GFElement {
         let mut le_bytes = [0, 0, 0, 0];
-        for i in 0..bytes.len() {
+        for i in 0..self.num_bytes {
             le_bytes[i] = bytes[i];
         }
 
