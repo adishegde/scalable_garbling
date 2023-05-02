@@ -138,7 +138,7 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
             };
 
             let chan = net.channel(&bench_proto).await;
-            network::message_from_each_party(chan.receiver(), n as usize)
+            network::message_from_each_party(&chan, n as usize)
                 .await
                 .into_iter()
                 .for_each(|data| {

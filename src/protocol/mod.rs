@@ -90,10 +90,6 @@ impl<S, R> ProtoChannel<S, R> {
             .await
             .expect("Channel receiver to be open.")
     }
-
-    pub fn receiver(&self) -> Receiver<R> {
-        self.receiver.clone()
-    }
 }
 
 pub struct ProtoChannelBuilder<S, R> {

@@ -1,4 +1,4 @@
-use super::{ProtoChannelBuilder, ProtocolID};
+use super::{ProtoChannel, ProtoChannelBuilder, ProtocolID};
 use crate::spawn;
 use crate::PartyID;
 use smol;
@@ -68,6 +68,7 @@ impl Stats {
 }
 
 pub type NetworkChannelBuilder = ProtoChannelBuilder<SendMessage, ReceivedMessage>;
+pub type NetworkChannel = ProtoChannel<SendMessage, ReceivedMessage>;
 
 pub async fn setup_tcp_network(
     party_id: PartyID,
@@ -186,20 +187,30 @@ pub async fn setup_local_network(num_parties: usize) -> Vec<(Stats, NetworkChann
     stats.into_iter().zip(net_builders.into_iter()).collect()
 }
 
+pub async fn sync(proto_id: ProtocolID, chan: &NetworkChannel, num_parties: usize) {
+    let data = b"sync".to_vec();
+
+    chan.send(SendMessage {
+        to: Recipient::All,
+        proto_id,
+        data,
+    })
+    .await;
+
+    message_from_each_party(chan, num_parties).await;
+}
+
 /// Waits to receive a message from each party and then returns the list of messages in order of
 /// the party ID.
 /// If multiple messages are received from the same party, the first one is returned and the latter
 /// ones are dropped.
-pub async fn message_from_each_party(
-    receiver: Receiver<ReceivedMessage>,
-    num_parties: usize,
-) -> Vec<Vec<u8>> {
+pub async fn message_from_each_party(chan: &NetworkChannel, num_parties: usize) -> Vec<Vec<u8>> {
     let mut mssgs = vec![Vec::new(); num_parties];
     let mut has_sent = vec![false; num_parties];
     let mut counter = 0;
 
     while counter != num_parties {
-        let mssg = receiver.recv().await.unwrap();
+        let mssg = chan.recv().await;
         if !has_sent[mssg.from as usize] {
             mssgs[mssg.from as usize] = mssg.data;
             counter += 1;

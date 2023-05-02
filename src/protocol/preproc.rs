@@ -47,7 +47,7 @@ pub async fn rand(id: ProtocolID, context: RandContext) -> Vec<PackedShare> {
         .await;
     }
 
-    let sent_shares: Vec<_> = network::message_from_each_party(chan.receiver(), context.n)
+    let sent_shares: Vec<_> = network::message_from_each_party(&chan, context.n)
         .await
         .into_iter()
         .map(|d| context.gf.deserialize_element(&d))
@@ -101,7 +101,7 @@ pub async fn zero(id: ProtocolID, context: ZeroContext) -> Vec<PackedShare> {
         .await;
     }
 
-    let sent_shares: Vec<_> = network::message_from_each_party(chan.receiver(), context.n)
+    let sent_shares: Vec<_> = network::message_from_each_party(&chan, context.n)
         .await
         .into_iter()
         .map(|d| context.gf.deserialize_element(&d))
@@ -172,7 +172,7 @@ pub async fn randbit(
         .await;
     }
 
-    let sent_shares: Vec<_> = network::message_from_each_party(chan.receiver(), context.n)
+    let sent_shares: Vec<_> = network::message_from_each_party(&chan, context.n)
         .await
         .into_iter()
         .map(|d| context.gf.deserialize_element(&d))

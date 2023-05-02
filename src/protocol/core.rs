@@ -37,7 +37,7 @@ pub async fn reduce_degree(
     .await;
 
     if context.id == leader {
-        let shares: Vec<_> = network::message_from_each_party(chan.receiver(), context.n)
+        let shares: Vec<_> = network::message_from_each_party(&chan, context.n)
             .await
             .into_iter()
             .map(|d| context.gf.deserialize_element(&d))
@@ -63,6 +63,71 @@ pub async fn reduce_degree(
     share - random
 }
 
+pub async fn batch_reduce_degree(
+    id: ProtocolID,
+    x: Vec<PackedShare>,
+    randoms: Vec<PackedShare>,
+    zeros: Vec<PackedShare>,
+    context: MPCContext,
+) -> Vec<PackedShare> {
+    let leader: PartyID = (hash(&id) % (context.n as u64)).try_into().unwrap();
+
+    let chan = context.net_builder.channel(&id).await;
+
+    let x_recon: Vec<_> = x
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| v + randoms[i] + zeros[i])
+        .collect();
+    chan.send(SendMessage {
+        to: Recipient::One(leader),
+        proto_id: id.clone(),
+        data: context.gf.serialize_vec(&x_recon),
+    })
+    .await;
+
+    if context.id == leader {
+        let shares_list: Vec<_> = network::message_from_each_party(&chan, context.n)
+            .await
+            .into_iter()
+            .map(|d| context.gf.deserialize_vec(&d))
+            .collect();
+
+        let secrets: Vec<_> = (0..x_recon.len())
+            .map(|i| {
+                let shares: Vec<_> = shares_list.iter().map(|s| s[i]).collect();
+                context.pss.recon_n(&shares, context.gf.as_ref())
+            })
+            .collect();
+
+        let shares_list: Vec<_> = {
+            let mut rng = rand::thread_rng();
+            secrets
+                .iter()
+                .map(|s| context.pss.share(s, context.gf.as_ref(), &mut rng))
+                .collect()
+        };
+
+        for i in 0..context.n {
+            let shares: Vec<_> = shares_list.iter().map(|s| s[i]).collect();
+
+            chan.send(SendMessage {
+                to: Recipient::One(i as PartyID),
+                proto_id: id.clone(),
+                data: context.gf.serialize_vec(&shares),
+            })
+            .await;
+        }
+    }
+
+    let shares = context.gf.deserialize_vec(&chan.recv().await.data);
+    shares
+        .into_iter()
+        .zip(randoms.into_iter())
+        .map(|(s, r)| s - r)
+        .collect()
+}
+
 pub async fn mult(
     id: ProtocolID,
     x: PackedShare,
@@ -73,6 +138,26 @@ pub async fn mult(
 ) -> PackedShare {
     let product = x * y;
     reduce_degree(id, product, random, zero, context).await
+}
+
+pub async fn batch_mult(
+    id: ProtocolID,
+    x: Vec<PackedShare>,
+    y: Vec<PackedShare>,
+    randoms: Vec<PackedShare>,
+    zeros: Vec<PackedShare>,
+    context: MPCContext,
+) -> Vec<PackedShare> {
+    debug_assert_eq!(x.len(), y.len());
+    debug_assert_eq!(y.len(), randoms.len());
+    debug_assert_eq!(randoms.len(), zeros.len());
+
+    let product = x
+        .into_iter()
+        .zip(y.into_iter())
+        .map(|(i, j)| i * j)
+        .collect();
+    batch_reduce_degree(id, product, randoms, zeros, context).await
 }
 
 /// Describes a sharing transformation.
@@ -123,7 +208,7 @@ pub async fn trans(
     .await;
 
     if context.id == leader {
-        let shares: Vec<_> = network::message_from_each_party(chan.receiver(), context.n)
+        let shares: Vec<_> = network::message_from_each_party(&chan, context.n)
             .await
             .into_iter()
             .map(|d| context.gf.deserialize_element(&d))
@@ -154,6 +239,85 @@ pub async fn trans(
 
     let share = context.gf.deserialize_element(&chan.recv().await.data);
     share - random
+}
+
+pub async fn batch_trans(
+    id: ProtocolID,
+    x: Vec<PackedShare>,
+    randoms: Vec<PackedShare>,
+    randoms_n: Vec<PackedShare>,
+    transform: SharingTransform,
+    context: MPCContext,
+) -> Vec<PackedShare> {
+    let leader: PartyID = (hash(&id) % (context.n as u64)).try_into().unwrap();
+    let chan = context.net_builder.channel(&id).await;
+
+    debug_assert_eq!(x.len(), randoms.len());
+    debug_assert_eq!(x.len(), randoms_n.len());
+
+    let x_recon: Vec<_> = x
+        .iter()
+        .zip(randoms_n.iter())
+        .map(|(&v, &r)| v + r)
+        .collect();
+
+    chan.send(SendMessage {
+        to: Recipient::One(leader),
+        proto_id: id.clone(),
+        data: context.gf.serialize_vec(&x_recon),
+    })
+    .await;
+
+    if context.id == leader {
+        let shares_list: Vec<_> = network::message_from_each_party(&chan, context.n)
+            .await
+            .into_iter()
+            .map(|d| context.gf.deserialize_vec(&d))
+            .collect();
+
+        let secrets: Vec<_> = (0..x_recon.len())
+            .map(|i| {
+                let shares: Vec<_> = shares_list.iter().map(|s| s[i]).collect();
+                let secrets: Vec<_> =
+                    utils::matrix_vector_prod(&transform.recon_n, &shares, context.gf.as_ref())
+                        .collect();
+                transform.f.apply(&secrets)
+            })
+            .collect();
+
+        let shares_list: Vec<_> = {
+            let mut rng = rand::thread_rng();
+            secrets
+                .into_iter()
+                .map(|s| {
+                    context.pss.share_using_coeffs(
+                        s,
+                        transform.share.as_ref(),
+                        context.gf.as_ref(),
+                        &mut rng,
+                    )
+                })
+                .collect()
+        };
+
+        for i in 0..context.n {
+            let shares: Vec<_> = shares_list.iter().map(|s| s[i]).collect();
+
+            chan.send(SendMessage {
+                to: Recipient::One(i as PartyID),
+                proto_id: id.clone(),
+                data: context.gf.serialize_vec(&shares),
+            })
+            .await;
+        }
+    }
+
+    let shares = context.gf.deserialize_vec(&chan.recv().await.data);
+    shares
+        .into_iter()
+        .zip(randoms.into_iter())
+        .map(|(s, r)| s - r)
+        .collect()
 }
 
 #[derive(Clone)]
@@ -318,18 +482,12 @@ impl RandSharingTransform {
     }
 }
 
-pub async fn randtrans(
-    id: ProtocolID,
-    randoms: Vec<GFElement>,
-    zeros: Vec<GFElement>,
-    transform: RandSharingTransform,
-    context: MPCContext,
-) -> Vec<(PackedShare, PackedShare)> {
-    debug_assert_eq!(randoms.len(), context.n + context.t);
-    debug_assert_eq!(zeros.len(), 2 * context.n);
-
-    let chan = context.net_builder.channel(&id).await;
-
+pub fn randtrans_comp(
+    randoms: &[GFElement],
+    zeros: &[GFElement],
+    transform: &RandSharingTransform,
+    context: &MPCContext,
+) -> (Vec<PackedShare>, Vec<PackedShare>) {
     let secrets = &randoms[..context.l];
     let randtape = &randoms[context.n..(context.n + context.t)];
     let zeros_n = &zeros[..context.n];
@@ -365,6 +523,23 @@ pub async fn randtrans(
             .collect()
     };
 
+    (shares, shares_n)
+}
+
+pub async fn randtrans(
+    id: ProtocolID,
+    randoms: Vec<GFElement>,
+    zeros: Vec<GFElement>,
+    transform: RandSharingTransform,
+    context: MPCContext,
+) -> Vec<(PackedShare, PackedShare)> {
+    debug_assert_eq!(randoms.len(), context.n + context.t);
+    debug_assert_eq!(zeros.len(), 2 * context.n);
+
+    let chan = context.net_builder.channel(&id).await;
+
+    let (shares, shares_n) = randtrans_comp(&randoms, &zeros, &transform, &context);
+
     for (i, (share, share_n)) in shares.into_iter().zip(shares_n.into_iter()).enumerate() {
         chan.send(SendMessage {
             to: Recipient::One(i as PartyID),
@@ -374,15 +549,14 @@ pub async fn randtrans(
         .await;
     }
 
-    let (shares, shares_n): (Vec<_>, Vec<_>) =
-        network::message_from_each_party(chan.receiver(), context.n)
-            .await
-            .into_iter()
-            .map(|d| {
-                let vals = context.gf.deserialize_vec(&d);
-                (vals[0], vals[1])
-            })
-            .unzip();
+    let (shares, shares_n): (Vec<_>, Vec<_>) = network::message_from_each_party(&chan, context.n)
+        .await
+        .into_iter()
+        .map(|d| {
+            let vals = context.gf.deserialize_vec(&d);
+            (vals[0], vals[1])
+        })
+        .unzip();
 
     context
         .pss
@@ -395,4 +569,74 @@ pub async fn randtrans(
                 .into_iter(),
         )
         .collect()
+}
+
+pub async fn batch_randtrans(
+    id: ProtocolID,
+    randoms: Vec<GFElement>,
+    zeros: Vec<GFElement>,
+    transform: RandSharingTransform,
+    context: MPCContext,
+) -> Vec<Vec<(PackedShare, PackedShare)>> {
+    let batch_size = randoms.len() / (context.n + context.t);
+    let rands_per_batch = context.n + context.t;
+    let zeros_per_batch = 2 * context.n;
+    debug_assert_eq!(randoms.len(), batch_size * rands_per_batch);
+    debug_assert_eq!(zeros.len(), batch_size * zeros_per_batch);
+
+    let chan = context.net_builder.channel(&id).await;
+
+    let mut shares_list: Vec<_> = (0..context.n)
+        .map(|_| Vec::with_capacity(context.n))
+        .collect();
+    for i in 0..batch_size {
+        let (shares, shares_n) = randtrans_comp(
+            &randoms[(i * rands_per_batch)..((i + 1) * rands_per_batch)],
+            &zeros[(i * zeros_per_batch)..((i + 1) * zeros_per_batch)],
+            &transform,
+            &context,
+        );
+        for i in 0..context.n {
+            shares_list[i].push(shares[i]);
+            shares_list[i].push(shares_n[i]);
+        }
+    }
+
+    for (i, shares) in shares_list.into_iter().enumerate() {
+        chan.send(SendMessage {
+            to: Recipient::One(i as PartyID),
+            proto_id: id.clone(),
+            data: context.gf.serialize_vec(&shares),
+        })
+        .await;
+    }
+
+    let shares_list: Vec<_> = network::message_from_each_party(&chan, context.n)
+        .await
+        .into_iter()
+        .map(|d| context.gf.deserialize_vec(&d))
+        .collect();
+
+    let mut res: Vec<_> = (0..context.l)
+        .map(|_| Vec::with_capacity(batch_size))
+        .collect();
+    for i in 0..batch_size {
+        let shares: Vec<_> = shares_list.iter().map(|shares| shares[2 * i]).collect();
+        let shares_n: Vec<_> = shares_list.iter().map(|shares| shares[2 * i + 1]).collect();
+
+        context
+            .pss
+            .recon_n(&shares, context.gf.as_ref())
+            .into_iter()
+            .zip(
+                context
+                    .pss
+                    .recon_n(&shares_n, context.gf.as_ref())
+                    .into_iter(),
+            )
+            .enumerate()
+            .for_each(|(i, trans_share)| res[i].push(trans_share));
+    }
+
+    res
 }

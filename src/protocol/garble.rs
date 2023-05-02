@@ -385,147 +385,122 @@ pub async fn garble(
     }
 
     let num_trans_per_wire = 2 * mpcctx.lpn_key_len + 1;
-    let num_subproto = (context.out_rtrans.len() + context.inp_rtrans.len() + num_blocks)
-        * num_trans_per_wire
-        + num_gate_blocks;
+    let num_subproto =
+        context.out_rtrans.len() + context.inp_rtrans.len() + num_blocks + num_gate_blocks;
     let mut id_gen = ProtocolIDBuilder::new(&id, num_subproto as u64);
 
     // Run randtrans for transforming keys and masks.
     let mut out_rtrans_handles = Vec::with_capacity(context.out_rtrans.len());
     for rtrans in context.out_rtrans.iter() {
-        let mut handles = Vec::with_capacity(num_trans_per_wire);
-        for _ in 0..num_trans_per_wire {
-            let randoms = preproc
-                .randoms
-                .split_off(preproc.randoms.len() - mpcctx.n - mpcctx.t);
-            let zeros = preproc.zeros.split_off(preproc.zeros.len() - 2 * mpcctx.n);
-            handles.push(spawn(core::randtrans(
-                id_gen.next().unwrap(),
-                randoms,
-                zeros,
-                rtrans.clone(),
-                mpcctx.clone(),
-            )));
-        }
-
-        debug_assert_eq!(handles.len(), 2 * mpcctx.lpn_key_len + 1);
-        out_rtrans_handles.push(handles);
+        let randoms = preproc
+            .randoms
+            .split_off(preproc.randoms.len() - (mpcctx.n + mpcctx.t) * num_trans_per_wire);
+        let zeros = preproc
+            .zeros
+            .split_off(preproc.zeros.len() - 2 * mpcctx.n * num_trans_per_wire);
+        out_rtrans_handles.push(spawn(core::batch_randtrans(
+            id_gen.next().unwrap(),
+            randoms,
+            zeros,
+            rtrans.clone(),
+            mpcctx.clone(),
+        )));
     }
-    debug_assert_eq!(out_rtrans_handles.len(), context.out_rtrans.len());
 
     // Run randtrans for transforming input keys and masks for each packed gate.
     let mut inp_rtrans_handles = Vec::with_capacity(context.inp_rtrans.len());
     for rtrans in context.inp_rtrans.iter() {
-        let mut handles = Vec::with_capacity(num_trans_per_wire);
-        for _ in 0..num_trans_per_wire {
-            let randoms = preproc
-                .randoms
-                .split_off(preproc.randoms.len() - mpcctx.n - mpcctx.t);
-            let zeros = preproc.zeros.split_off(preproc.zeros.len() - 2 * mpcctx.n);
-            handles.push(spawn(core::randtrans(
-                id_gen.next().unwrap(),
-                randoms,
-                zeros,
-                rtrans.clone(),
-                mpcctx.clone(),
-            )));
-        }
-
-        debug_assert_eq!(handles.len(), 2 * mpcctx.lpn_key_len + 1);
-        inp_rtrans_handles.push(handles);
+        let randoms = preproc
+            .randoms
+            .split_off(preproc.randoms.len() - (mpcctx.n + mpcctx.t) * num_trans_per_wire);
+        let zeros = preproc
+            .zeros
+            .split_off(preproc.zeros.len() - 2 * mpcctx.n * num_trans_per_wire);
+        inp_rtrans_handles.push(spawn(core::batch_randtrans(
+            id_gen.next().unwrap(),
+            randoms,
+            zeros,
+            rtrans.clone(),
+            mpcctx.clone(),
+        )));
     }
-    debug_assert_eq!(inp_rtrans_handles.len(), context.inp_rtrans.len());
 
     // Transform masks and keys for output wire of each gate.
-    // Iterate over l chunks of gates.
-    let mut out_trans_handles: Vec<_> = (0..(2 * mpcctx.lpn_key_len + 1))
-        .map(|_| Vec::with_capacity(circ.gates().len()))
-        .collect();
+    let mut out_trans_handles = Vec::with_capacity(num_blocks);
+    let mut out_rtrans_stream = smol::stream::iter(out_rtrans_handles)
+        .then(|fut| async { fut.await })
+        .map(|shares| smol::stream::iter(shares))
+        .flatten()
+        .boxed();
 
-    for (i, handles) in out_rtrans_handles.into_iter().enumerate() {
-        // Map i to appropriate range of gate indices.
-        let beg = mpcctx.l * i;
-        let end = std::cmp::min(mpcctx.l * (i + 1), num_blocks);
+    for i in 0..num_blocks {
+        let trans_shares = out_rtrans_stream.next().await.unwrap();
+        let (share, share_n) = trans_shares.into_iter().unzip();
 
-        // Iterate over 2 * lpn_key_len + 1 transformed random shares.
-        for (j, handle) in handles.into_iter().enumerate() {
-            let shares = handle.await;
-
-            // Iterate over appropriate blocks.
-            for (block, (share, share_n)) in (beg..end).zip(shares) {
-                let x = if j < mpcctx.lpn_key_len {
-                    preproc.keys[0][j][block]
+        let trans_inp = (0..num_trans_per_wire)
+            .map(|j| {
+                if j < mpcctx.lpn_key_len {
+                    preproc.keys[0][j][i]
                 } else if j < 2 * mpcctx.lpn_key_len {
-                    preproc.keys[1][j - mpcctx.lpn_key_len][block]
+                    preproc.keys[1][j - mpcctx.lpn_key_len][i]
                 } else {
-                    preproc.masks[block]
-                };
+                    preproc.masks[i]
+                }
+            })
+            .collect();
 
-                out_trans_handles[j].push(spawn(core::trans(
-                    id_gen.next().unwrap(),
-                    x,
-                    share,
-                    share_n,
-                    context.out_trans[block].clone(),
-                    mpcctx.clone(),
-                )));
-            }
-        }
+        out_trans_handles.push(spawn(core::batch_trans(
+            id_gen.next().unwrap(),
+            trans_inp,
+            share,
+            share_n,
+            context.out_trans[i].clone(),
+            mpcctx.clone(),
+        )));
     }
 
     // Collect transformed keys and masks for output wires.
     let mut masks = Vec::with_capacity(num_blocks);
-    let mut keys = [Vec::with_capacity(mpcctx.l), Vec::with_capacity(mpcctx.l)];
+    let mut keys: [Vec<_>; 2] = [
+        (0..mpcctx.lpn_key_len)
+            .map(|_| Vec::with_capacity(num_blocks))
+            .collect(),
+        (0..mpcctx.lpn_key_len)
+            .map(|_| Vec::with_capacity(num_blocks))
+            .collect(),
+    ];
 
-    for handle in out_trans_handles.pop().unwrap() {
-        masks.push(handle.await);
-    }
-    debug_assert_eq!(masks.len(), num_blocks);
+    for handle in out_trans_handles {
+        let mut shares = handle.await;
+        masks.push(shares.pop().unwrap());
 
-    for (i, handles) in out_trans_handles.into_iter().enumerate() {
-        let mut key = Vec::with_capacity(num_blocks);
-
-        for handle in handles {
-            key.push(handle.await);
-        }
-
-        debug_assert_eq!(key.len(), num_blocks);
-
-        if i < mpcctx.lpn_key_len {
-            keys[0].push(key);
-        } else {
-            keys[1].push(key);
+        for i in 0..2 {
+            for j in 0..mpcctx.lpn_key_len {
+                keys[i][j].push(shares[i * mpcctx.lpn_key_len + j]);
+            }
         }
     }
-    debug_assert_eq!(keys[0].len(), mpcctx.lpn_key_len);
-    debug_assert_eq!(keys[1].len(), mpcctx.lpn_key_len);
+    #[cfg(debug_assertions)]
+    {
+        assert_eq!(keys[0].len(), mpcctx.lpn_key_len);
+        assert_eq!(keys[1].len(), mpcctx.lpn_key_len);
+
+        for i in 0..mpcctx.lpn_key_len {
+            assert_eq!(keys[0][i].len(), num_blocks);
+            assert_eq!(keys[1][i].len(), num_blocks);
+        }
+    }
 
     // These are used for selecting inputs for each packed gate.
     let masks = Arc::new(masks);
     let keys = Arc::new(keys);
 
     // Transform inputs to gates and compute garbled circuit.
-    let mut inp_trans_stream = {
-        let l = mpcctx.l;
-        let temp = inp_rtrans_handles.into_iter().map(move |handles| {
-            let acc_init: Vec<_> = (0..l).map(|_| Vec::with_capacity(handles.len())).collect();
-
-            smol::stream::iter(handles)
-                .then(|h| async { h.await })
-                .fold(acc_init, |mut acc, shares| {
-                    for (i, share) in shares.into_iter().enumerate() {
-                        acc[i].push(share);
-                    }
-                    acc
-                })
-        });
-
-        smol::stream::iter(temp)
-            .then(|fut| async { fut.await })
-            .map(|shares| smol::stream::iter(shares))
-            .flatten()
-            .boxed()
-    };
+    let mut inp_trans_stream = smol::stream::iter(inp_rtrans_handles)
+        .then(|fut| async { fut.await })
+        .map(|shares| smol::stream::iter(shares))
+        .flatten()
+        .boxed();
 
     let mut gc_handles = Vec::with_capacity(circ.gates().len());
     for (gid, gate) in circ.gates().iter().enumerate() {
@@ -651,42 +626,37 @@ async fn transform_inputs<const N: usize>(
     ginf: &PackedGateInfo<N>,
     masks: &[PackedShare],
     keys: &[Vec<Vec<PackedShare>>; 2],
-    mut rtrans: [Vec<(PackedShare, PackedShare)>; N],
+    rtrans: [Vec<(PackedShare, PackedShare)>; N],
     context: &GarbleContext,
 ) -> ([PackedShare; N], [[Vec<PackedShare>; 2]; N]) {
     let mpcctx = &context.mpc;
+    let mut id_gen = ProtocolIDBuilder::new(&id, (N + 1) as u64);
 
-    let mut id_gen = ProtocolIDBuilder::new(&id, (2 * N * mpcctx.lpn_key_len + N) as u64);
-
-    let mut handles = [(); N].map(|_| Vec::with_capacity(2 * mpcctx.lpn_key_len + 1));
-    for l in 0..mpcctx.lpn_key_len {
-        for k in 0..2 {
+    let mut trans_inp: Vec<_> = (0..N)
+        .map(|_| Vec::with_capacity(2 * mpcctx.lpn_key_len + 1))
+        .collect();
+    for k in 0..2 {
+        for l in 0..mpcctx.lpn_key_len {
             let selected_keys = context
                 .selector
                 .select(&keys[k][l], gid, ginf, mpcctx.gf.as_ref());
-
-            for i in 0..N {
-                let (share, share_n) = rtrans[i].pop().unwrap();
-                handles[i].push(spawn(core::trans(
-                    id_gen.next().unwrap(),
-                    selected_keys[i],
-                    share,
-                    share_n,
-                    context.inp_trans[gid][i].clone(),
-                    mpcctx.clone(),
-                )));
+            for (i, val) in selected_keys.into_iter().enumerate() {
+                trans_inp[i].push(val);
             }
         }
     }
 
-    let selected_masks = context
-        .selector
-        .select(&masks, gid, ginf, mpcctx.gf.as_ref());
     for i in 0..N {
-        let (share, share_n) = rtrans[i].pop().unwrap();
-        handles[i].push(spawn(core::trans(
+        trans_inp[i].push(masks[i]);
+    }
+
+    let mut handles = Vec::with_capacity(N);
+    for (i, (trans_shares, trans_inp)) in rtrans.into_iter().zip(trans_inp).enumerate() {
+        let (share, share_n) = trans_shares.into_iter().unzip();
+
+        handles.push(spawn(core::batch_trans(
             id_gen.next().unwrap(),
-            selected_masks[i],
+            trans_inp,
             share,
             share_n,
             context.inp_trans[gid][i].clone(),
@@ -695,24 +665,15 @@ async fn transform_inputs<const N: usize>(
     }
 
     let mut trans_masks = [mpcctx.gf.zero(); N];
-    for i in 0..N {
-        trans_masks[i] = handles[i].pop().unwrap().await
-    }
+    let mut trans_keys = [(); N].map(|_| [Vec::new(), Vec::new()]);
 
-    let mut trans_keys = [(); N].map(|_| {
-        [
-            Vec::with_capacity(mpcctx.lpn_key_len),
-            Vec::with_capacity(mpcctx.lpn_key_len),
-        ]
-    });
     for (i, handle) in handles.into_iter().enumerate() {
-        for (j, h) in handle.into_iter().enumerate() {
-            if j < mpcctx.lpn_key_len {
-                trans_keys[i][0].push(h.await);
-            } else {
-                trans_keys[i][1].push(h.await);
-            }
-        }
+        let mut shares = handle.await;
+        trans_masks[i] = shares.pop().unwrap();
+        trans_keys[i][1] = shares.split_off(mpcctx.lpn_key_len);
+        trans_keys[i][0] = shares;
+
+        debug_assert_eq!(trans_keys[i][0].len(), mpcctx.lpn_key_len);
     }
 
     (trans_masks, trans_keys)
@@ -749,15 +710,15 @@ async fn garble_and(
     out_key: [Vec<PackedShare>; 2],
     mut randoms: Vec<PackedShare>,
     mut zeros: Vec<PackedShare>,
-    mut errors: Vec<PackedShare>,
+    errors: Vec<PackedShare>,
     context: GarbleContext,
 ) -> GarbledGate {
     let mpcctx = &context.mpc;
-    let mut id_gen = ProtocolIDBuilder::new(&id, 4 * mpcctx.lpn_mssg_len as u64);
+    let num_ctxs = 4 * mpcctx.lpn_mssg_len;
 
-    debug_assert_eq!(randoms.len(), 4 * mpcctx.lpn_mssg_len + 1);
-    debug_assert_eq!(zeros.len(), 4 * mpcctx.lpn_mssg_len + 1);
-    debug_assert_eq!(errors.len(), 4 * mpcctx.lpn_mssg_len);
+    debug_assert_eq!(randoms.len(), num_ctxs + 1);
+    debug_assert_eq!(zeros.len(), num_ctxs + 1);
+    debug_assert_eq!(errors.len(), num_ctxs);
 
     // Compute product of input masks.
     // Will be used to compute the garbled table later.
@@ -780,75 +741,54 @@ async fn garble_and(
     });
 
     // Compute ciphertexts for the garbled table.
-    let mut all_handles = Vec::with_capacity(4);
-    for i in 0..2 {
-        for j in 0..2 {
-            let row_idx = 2 * i + j;
-            let mut handles = Vec::with_capacity(mpcctx.lpn_mssg_len);
+    let mut select_bits = Vec::with_capacity(num_ctxs);
+    let mut mssg_diff = Vec::with_capacity(num_ctxs);
+    for i in 0..4 {
+        let select_bit = if i == 0 {
+            mask_prod + out_mask
+        } else if i == 1 {
+            mask_prod + inp_masks[0] + out_mask
+        } else if i == 2 {
+            mask_prod + inp_masks[1] + out_mask
+        } else {
+            mask_prod + inp_masks[0] + inp_masks[1] + mpcctx.gf.one() + out_mask
+        };
 
-            let select_bit = if i == 0 && j == 0 {
-                mask_prod + out_mask
-            } else if i == 0 && j == 1 {
-                mask_prod + inp_masks[0] + out_mask
-            } else if i == 1 && j == 0 {
-                mask_prod + inp_masks[1] + out_mask
-            } else {
-                mask_prod + inp_masks[0] + inp_masks[1] + mpcctx.gf.one() + out_mask
-            };
-
-            let lpn_key: Arc<Vec<_>> = Arc::new(
-                inp_keys[0][i]
-                    .iter()
-                    .zip(inp_keys[1][j].iter())
-                    .map(|(&k1, &k2)| k1 + k2)
-                    .collect(),
-            );
-
-            for k in 0..mpcctx.lpn_mssg_len {
-                let sub_id = id_gen.next().unwrap();
-                let mssg0 = mssgs[0][k];
-                let mssg1 = mssgs[1][k];
-                let lpn_key = lpn_key.clone();
-                let random = randoms.pop().unwrap();
-                let zero = zeros.pop().unwrap();
-                let error = errors.pop().unwrap();
-                let mpcctx = mpcctx.clone();
-
-                handles.push(spawn(async move {
-                    // If select_bit is 0 then encrypt mssg0 else encrypt mssg1.
-                    let selected_mssg = core::mult(
-                        sub_id,
-                        select_bit,
-                        mssg1 - mssg0,
-                        random,
-                        zero,
-                        mpcctx.clone(),
-                    )
-                    .await
-                        + mssg0;
-
-                    // Compute ciphertext element.
-                    let row = lpn_mat_row(gid, row_idx, k, mpcctx.lpn_mssg_len, mpcctx.gf.as_ref());
-                    math::utils::iprod(lpn_key.as_ref(), &row, mpcctx.gf.as_ref())
-                        + selected_mssg
-                        + error
-                }));
-            }
-            all_handles.push(handles);
+        for k in 0..mpcctx.lpn_mssg_len {
+            select_bits.push(select_bit);
+            mssg_diff.push(mssgs[1][k] - mssgs[0][k]);
         }
     }
+
+    let selected_mssgs =
+        core::batch_mult(id, select_bits, mssg_diff, randoms, zeros, mpcctx.clone()).await;
 
     // Collect all ciphertexts.
     let mut gtable = GarbledTable {
         ctxs: [(); 4].map(|_| Vec::with_capacity(mpcctx.lpn_mssg_len)),
     };
 
-    for (i, handles) in all_handles.into_iter().enumerate() {
-        for handle in handles {
-            gtable.ctxs[i].push(handle.await)
-        }
+    for i in 0..2 {
+        for j in 0..2 {
+            let row_idx = 2 * i + j;
 
-        debug_assert_eq!(gtable.ctxs[i].len(), mpcctx.lpn_mssg_len);
+            let lpn_key: Vec<_> = inp_keys[0][i]
+                .iter()
+                .zip(inp_keys[1][j].iter())
+                .map(|(&k1, &k2)| k1 + k2)
+                .collect();
+
+            for k in 0..mpcctx.lpn_mssg_len {
+                let mssg = selected_mssgs[row_idx * mpcctx.lpn_mssg_len + k] + mssgs[0][k];
+                let row = lpn_mat_row(gid, row_idx, k, mpcctx.lpn_mssg_len, mpcctx.gf.as_ref());
+                gtable.ctxs[row_idx].push(
+                    math::utils::iprod(&lpn_key, &row, mpcctx.gf.as_ref())
+                        + mssg
+                        + errors[row_idx * mpcctx.lpn_mssg_len + k],
+                );
+            }
+            debug_assert_eq!(gtable.ctxs[row_idx].len(), mpcctx.lpn_mssg_len);
+        }
     }
 
     GarbledGate::And(gtable)
@@ -861,17 +801,17 @@ async fn garble_xor(
     inp_keys: [[Vec<PackedShare>; 2]; 2],
     out_mask: PackedShare,
     out_key: [Vec<PackedShare>; 2],
-    mut randoms: Vec<PackedShare>,
-    mut zeros: Vec<PackedShare>,
-    mut errors: Vec<PackedShare>,
+    randoms: Vec<PackedShare>,
+    zeros: Vec<PackedShare>,
+    errors: Vec<PackedShare>,
     context: GarbleContext,
 ) -> GarbledGate {
     let mpcctx = &context.mpc;
-    let mut id_gen = ProtocolIDBuilder::new(&id, 4 * mpcctx.lpn_mssg_len as u64);
+    let num_ctxs = 4 * mpcctx.lpn_mssg_len;
 
-    debug_assert_eq!(randoms.len(), 4 * mpcctx.lpn_mssg_len);
-    debug_assert_eq!(zeros.len(), 4 * mpcctx.lpn_mssg_len);
-    debug_assert_eq!(errors.len(), 4 * mpcctx.lpn_mssg_len);
+    debug_assert_eq!(randoms.len(), num_ctxs);
+    debug_assert_eq!(zeros.len(), num_ctxs);
+    debug_assert_eq!(errors.len(), num_ctxs);
 
     // RS encode the output keys concatenated with their labels.
     let mut out_key = out_key;
@@ -882,75 +822,54 @@ async fn garble_xor(
     });
 
     // Compute ciphertexts for the garbled table.
-    let mut all_handles = Vec::with_capacity(4);
-    for i in 0..2 {
-        for j in 0..2 {
-            let row_idx = 2 * i + j;
-            let mut handles = Vec::with_capacity(mpcctx.lpn_mssg_len);
+    let mut select_bits = Vec::with_capacity(num_ctxs);
+    let mut mssg_diff = Vec::with_capacity(num_ctxs);
+    for i in 0..4 {
+        let select_bit = if i == 0 {
+            inp_masks[0] + inp_masks[1] + out_mask
+        } else if i == 1 {
+            inp_masks[0] + inp_masks[1] + mpcctx.gf.one() + out_mask
+        } else if i == 2 {
+            inp_masks[0] + inp_masks[1] + mpcctx.gf.one() + out_mask
+        } else {
+            inp_masks[0] + inp_masks[1] + out_mask
+        };
 
-            let select_bit = if i == 0 && j == 0 {
-                inp_masks[0] + inp_masks[1] + out_mask
-            } else if i == 0 && j == 1 {
-                inp_masks[0] + inp_masks[1] + mpcctx.gf.one() + out_mask
-            } else if i == 1 && j == 0 {
-                inp_masks[0] + inp_masks[1] + mpcctx.gf.one() + out_mask
-            } else {
-                inp_masks[0] + inp_masks[1] + out_mask
-            };
-
-            let lpn_key: Arc<Vec<_>> = Arc::new(
-                inp_keys[0][i]
-                    .iter()
-                    .zip(inp_keys[1][j].iter())
-                    .map(|(&k1, &k2)| k1 + k2)
-                    .collect(),
-            );
-
-            for k in 0..mpcctx.lpn_mssg_len {
-                let sub_id = id_gen.next().unwrap();
-                let mssg0 = mssgs[0][k];
-                let mssg1 = mssgs[1][k];
-                let lpn_key = lpn_key.clone();
-                let random = randoms.pop().unwrap();
-                let zero = zeros.pop().unwrap();
-                let error = errors.pop().unwrap();
-                let mpcctx = mpcctx.clone();
-
-                handles.push(spawn(async move {
-                    // If select_bit is 0 then encrypt mssg0 else encrypt mssg1.
-                    let selected_mssg = core::mult(
-                        sub_id,
-                        select_bit,
-                        mssg1 - mssg0,
-                        random,
-                        zero,
-                        mpcctx.clone(),
-                    )
-                    .await
-                        + mssg0;
-
-                    // Compute ciphertext element.
-                    let row = lpn_mat_row(gid, row_idx, k, mpcctx.lpn_mssg_len, mpcctx.gf.as_ref());
-                    math::utils::iprod(lpn_key.as_ref(), &row, mpcctx.gf.as_ref())
-                        + selected_mssg
-                        + error
-                }));
-            }
-            all_handles.push(handles);
+        for k in 0..mpcctx.lpn_mssg_len {
+            select_bits.push(select_bit);
+            mssg_diff.push(mssgs[1][k] - mssgs[0][k]);
         }
     }
+
+    let selected_mssgs =
+        core::batch_mult(id, select_bits, mssg_diff, randoms, zeros, mpcctx.clone()).await;
 
     // Collect all ciphertexts.
     let mut gtable = GarbledTable {
         ctxs: [(); 4].map(|_| Vec::with_capacity(mpcctx.lpn_mssg_len)),
     };
 
-    for (i, handles) in all_handles.into_iter().enumerate() {
-        for handle in handles {
-            gtable.ctxs[i].push(handle.await)
-        }
+    for i in 0..2 {
+        for j in 0..2 {
+            let row_idx = 2 * i + j;
 
-        debug_assert_eq!(gtable.ctxs[i].len(), mpcctx.lpn_mssg_len);
+            let lpn_key: Vec<_> = inp_keys[0][i]
+                .iter()
+                .zip(inp_keys[1][j].iter())
+                .map(|(&k1, &k2)| k1 + k2)
+                .collect();
+
+            for k in 0..mpcctx.lpn_mssg_len {
+                let mssg = selected_mssgs[row_idx * mpcctx.lpn_mssg_len + k] + mssgs[0][k];
+                let row = lpn_mat_row(gid, row_idx, k, mpcctx.lpn_mssg_len, mpcctx.gf.as_ref());
+                gtable.ctxs[row_idx].push(
+                    math::utils::iprod(&lpn_key, &row, mpcctx.gf.as_ref())
+                        + mssg
+                        + errors[row_idx * mpcctx.lpn_mssg_len + k],
+                );
+            }
+            debug_assert_eq!(gtable.ctxs[row_idx].len(), mpcctx.lpn_mssg_len);
+        }
     }
 
     GarbledGate::Xor(gtable)
@@ -963,17 +882,17 @@ async fn garble_inv(
     inp_key: [Vec<PackedShare>; 2],
     out_mask: PackedShare,
     out_key: [Vec<PackedShare>; 2],
-    mut randoms: Vec<PackedShare>,
-    mut zeros: Vec<PackedShare>,
-    mut errors: Vec<PackedShare>,
+    randoms: Vec<PackedShare>,
+    zeros: Vec<PackedShare>,
+    errors: Vec<PackedShare>,
     context: GarbleContext,
 ) -> GarbledGate {
     let mpcctx = &context.mpc;
-    let mut id_gen = ProtocolIDBuilder::new(&id, 2 * mpcctx.lpn_mssg_len as u64);
+    let num_ctxs = 2 * mpcctx.lpn_mssg_len;
 
-    debug_assert_eq!(randoms.len(), 2 * mpcctx.lpn_mssg_len);
-    debug_assert_eq!(zeros.len(), 2 * mpcctx.lpn_mssg_len);
-    debug_assert_eq!(errors.len(), 2 * mpcctx.lpn_mssg_len);
+    debug_assert_eq!(randoms.len(), num_ctxs);
+    debug_assert_eq!(zeros.len(), num_ctxs);
+    debug_assert_eq!(errors.len(), num_ctxs);
 
     // RS encode the output keys concatenated with their labels.
     let mut out_key = out_key;
@@ -983,62 +902,39 @@ async fn garble_inv(
         math::utils::matrix_vector_prod(&context.lpn_enc, &k, mpcctx.gf.as_ref()).collect()
     });
 
-    // Compute ciphertexts for the garbled table.
-    let mut all_handles = [
-        Vec::with_capacity(mpcctx.lpn_mssg_len),
-        Vec::with_capacity(mpcctx.lpn_mssg_len),
-    ];
-    for (i, lpn_key) in inp_key.into_iter().enumerate() {
+    let mut select_bits = Vec::with_capacity(num_ctxs);
+    let mut mssg_diff = Vec::with_capacity(num_ctxs);
+    for i in 0..2 {
         let select_bit = if i == 0 {
             inp_mask + mpcctx.gf.one() + out_mask
         } else {
             inp_mask + out_mask
         };
 
-        let lpn_key = Arc::new(lpn_key);
-
         for k in 0..mpcctx.lpn_mssg_len {
-            let sub_id = id_gen.next().unwrap();
-            let mssg0 = mssgs[0][k];
-            let mssg1 = mssgs[1][k];
-            let lpn_key = lpn_key.clone();
-            let random = randoms.pop().unwrap();
-            let zero = zeros.pop().unwrap();
-            let error = errors.pop().unwrap();
-            let mpcctx = mpcctx.clone();
-
-            all_handles[i].push(spawn(async move {
-                // If select_bit is 0 then encrypt mssg0 else encrypt mssg1.
-                let selected_mssg = core::mult(
-                    sub_id,
-                    select_bit,
-                    mssg1 - mssg0,
-                    random,
-                    zero,
-                    mpcctx.clone(),
-                )
-                .await
-                    + mssg0;
-
-                // Compute ciphertext element.
-                let row = lpn_mat_row(gid, i, k, mpcctx.lpn_mssg_len, mpcctx.gf.as_ref());
-                math::utils::iprod(lpn_key.as_ref(), &row, mpcctx.gf.as_ref())
-                    + selected_mssg
-                    + error
-            }));
+            select_bits.push(select_bit);
+            mssg_diff.push(mssgs[1][k] - mssgs[0][k]);
         }
     }
 
-    // Collect all ciphertexts.
+    let selected_mssgs =
+        core::batch_mult(id, select_bits, mssg_diff, randoms, zeros, mpcctx.clone()).await;
+
     let mut gtable = GarbledTable {
         ctxs: [(); 2].map(|_| Vec::with_capacity(mpcctx.lpn_mssg_len)),
     };
 
-    for (i, handles) in all_handles.into_iter().enumerate() {
-        for handle in handles {
-            gtable.ctxs[i].push(handle.await)
+    // Compute ciphertexts for the garbled table.
+    for (i, lpn_key) in inp_key.into_iter().enumerate() {
+        for k in 0..mpcctx.lpn_mssg_len {
+            let mssg = selected_mssgs[i * mpcctx.lpn_mssg_len + k] + mssgs[0][k];
+            let row = lpn_mat_row(gid, i, k, mpcctx.lpn_mssg_len, mpcctx.gf.as_ref());
+            gtable.ctxs[i].push(
+                math::utils::iprod(&lpn_key, &row, mpcctx.gf.as_ref())
+                    + mssg
+                    + errors[i * mpcctx.lpn_mssg_len + k],
+            );
         }
-
         debug_assert_eq!(gtable.ctxs[i].len(), mpcctx.lpn_mssg_len);
     }
 
