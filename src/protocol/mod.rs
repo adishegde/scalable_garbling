@@ -33,7 +33,7 @@ pub struct ProtocolIDBuilder<'a> {
 impl<'a> ProtocolIDBuilder<'a> {
     /// num is an upper bound on the number of children created.
     pub fn new(parent_id: &'a ProtocolID, num: u64) -> Self {
-        let num_bytes = (num.next_power_of_two().ilog2() + 2) / 3;
+        let num_bytes = (num.next_power_of_two().ilog2() + 7) / 8;
         ProtocolIDBuilder {
             id: parent_id,
             suffix: vec![0; num_bytes.try_into().unwrap()],
