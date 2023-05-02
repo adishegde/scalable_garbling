@@ -1,6 +1,6 @@
-use async_global_executor;
 use smol::prelude::Future;
 use smol::Task;
+use smolscale;
 
 pub mod circuit;
 pub mod math;
@@ -22,9 +22,13 @@ where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    async_global_executor::spawn(future)
+    smolscale::spawn(future)
 }
 
-pub fn block_on<F: Future<Output = T>, T>(future: F) -> T {
-    async_global_executor::block_on(future)
+pub fn block_on<F, T>(future: F) -> T
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    smolscale::block_on(future)
 }
