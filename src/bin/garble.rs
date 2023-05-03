@@ -85,6 +85,10 @@ struct Garble {
     /// file to save benchmark data
     #[argh(option)]
     save: Option<String>,
+
+    /// number of threads
+    #[argh(option, default = "8")]
+    threads: usize,
 }
 
 async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
@@ -204,8 +208,7 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let opts: Garble = argh::from_env();
 
     let ipaddrs: Vec<_> = {
@@ -221,5 +224,10 @@ async fn main() {
         circ.pack(opts.packing_param)
     };
 
-    benchmark(circ, ipaddrs, opts).await;
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(opts.threads)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(benchmark(circ, ipaddrs, opts));
 }
