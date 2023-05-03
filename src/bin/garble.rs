@@ -176,8 +176,7 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
             to: network::Recipient::One(0),
             proto_id: bench_proto.clone(),
             data,
-        })
-        .await;
+        });
 
         if opts.id == 0 {
             let mut save_data = json::object! {
@@ -204,6 +203,14 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
 
             let save_path = PathBuf::from(save_path);
             std::fs::write(save_path, save_data.dump()).expect("Can write to save file");
+
+            chan.send(network::SendMessage {
+                to: network::Recipient::All,
+                proto_id: bench_proto,
+                data: b"done".to_vec(),
+            });
+        } else {
+            chan.recv().await;
         }
     }
 }

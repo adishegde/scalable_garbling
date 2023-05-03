@@ -33,8 +33,7 @@ pub async fn reduce_degree(
         to: Recipient::One(leader),
         proto_id: id.clone(),
         data: context.gf.serialize_element(&x_recon),
-    })
-    .await;
+    });
 
     if context.id == leader {
         let shares: Vec<_> = network::message_from_each_party(&mut chan, context.n)
@@ -54,8 +53,7 @@ pub async fn reduce_degree(
                 to: Recipient::One(i as PartyID),
                 proto_id: id.clone(),
                 data: context.gf.serialize_element(&share),
-            })
-            .await;
+            });
         }
     }
 
@@ -83,8 +81,7 @@ pub async fn batch_reduce_degree(
         to: Recipient::One(leader),
         proto_id: id.clone(),
         data: context.gf.serialize_vec(&x_recon),
-    })
-    .await;
+    });
 
     if context.id == leader {
         let shares_list: Vec<_> = network::message_from_each_party(&mut chan, context.n)
@@ -115,8 +112,7 @@ pub async fn batch_reduce_degree(
                 to: Recipient::One(i as PartyID),
                 proto_id: id.clone(),
                 data: context.gf.serialize_vec(&shares),
-            })
-            .await;
+            });
         }
     }
 
@@ -204,8 +200,7 @@ pub async fn trans(
         to: Recipient::One(leader),
         proto_id: id.clone(),
         data: context.gf.serialize_element(&x_recon),
-    })
-    .await;
+    });
 
     if context.id == leader {
         let shares: Vec<_> = network::message_from_each_party(&mut chan, context.n)
@@ -232,8 +227,7 @@ pub async fn trans(
                 to: Recipient::One(i as PartyID),
                 proto_id: id.clone(),
                 data: context.gf.serialize_element(&share),
-            })
-            .await;
+            });
         }
     }
 
@@ -265,8 +259,7 @@ pub async fn batch_trans(
         to: Recipient::One(leader),
         proto_id: id.clone(),
         data: context.gf.serialize_vec(&x_recon),
-    })
-    .await;
+    });
 
     if context.id == leader {
         let shares_list: Vec<_> = network::message_from_each_party(&mut chan, context.n)
@@ -307,8 +300,7 @@ pub async fn batch_trans(
                 to: Recipient::One(i as PartyID),
                 proto_id: id.clone(),
                 data: context.gf.serialize_vec(&shares),
-            })
-            .await;
+            });
         }
     }
 
@@ -545,8 +537,7 @@ pub async fn randtrans(
             to: Recipient::One(i as PartyID),
             proto_id: id.clone(),
             data: context.gf.serialize_vec(&[share, share_n]),
-        })
-        .await;
+        });
     }
 
     let (shares, shares_n): (Vec<_>, Vec<_>) =
@@ -608,8 +599,7 @@ pub async fn batch_randtrans(
             to: Recipient::One(i as PartyID),
             proto_id: id.clone(),
             data: context.gf.serialize_vec(&shares),
-        })
-        .await;
+        });
     }
 
     let shares_list: Vec<_> = network::message_from_each_party(&mut chan, context.n)

@@ -43,8 +43,7 @@ pub async fn rand(id: ProtocolID, context: RandContext) -> Vec<PackedShare> {
             to: Recipient::One(i as PartyID),
             proto_id: id.clone(),
             data: context.gf.serialize_element(&share),
-        })
-        .await;
+        });
     }
 
     let sent_shares: Vec<_> = network::message_from_each_party(&mut chan, context.n)
@@ -97,8 +96,7 @@ pub async fn zero(id: ProtocolID, context: ZeroContext) -> Vec<PackedShare> {
             to: Recipient::One(i as PartyID),
             proto_id: id.clone(),
             data: context.gf.serialize_element(&share),
-        })
-        .await;
+        });
     }
 
     let sent_shares: Vec<_> = network::message_from_each_party(&mut chan, context.n)
@@ -168,8 +166,7 @@ pub async fn randbit(
             to: Recipient::One(i as PartyID),
             proto_id: id.clone(),
             data: context.gf.serialize_element(&share),
-        })
-        .await;
+        });
     }
 
     let sent_shares: Vec<_> = network::message_from_each_party(&mut chan, context.n)

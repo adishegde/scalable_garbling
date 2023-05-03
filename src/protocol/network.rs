@@ -301,8 +301,7 @@ pub async fn sync(proto_id: ProtocolID, chan: &mut NetworkChannel, num_parties: 
         to: Recipient::All,
         proto_id,
         data,
-    })
-    .await;
+    });
 
     message_from_each_party(chan, num_parties).await;
 }

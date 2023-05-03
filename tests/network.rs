@@ -27,8 +27,7 @@ async fn net_local_two_party() {
                 to: network::Recipient::One(1),
                 proto_id: proto_id.clone(),
                 data: data.clone(),
-            })
-            .await;
+            });
 
             let mssg = chan.recv().await;
             assert_eq!(mssg.from, 1);
@@ -59,8 +58,7 @@ async fn net_local_two_party() {
             to: network::Recipient::One(0),
             proto_id,
             data,
-        })
-        .await;
+        });
 
         assert_eq!(stats.party(0).await.0, data_len);
         assert_eq!(stats.party(1).await, (0, 0));
@@ -89,8 +87,7 @@ async fn net_local_many_parties() {
                 to: network::Recipient::All,
                 proto_id: proto_id.clone(),
                 data: data.clone(),
-            })
-            .await;
+            });
 
             let mut recv_ids = vec![false; num];
 
@@ -141,22 +138,18 @@ async fn net_local_many_parties_two_ids() {
 
         handles.push(spawn(async move {
             let mut chan1 = net.channel(proto_id1.clone());
-            chan1
-                .send(network::SendMessage {
-                    to: network::Recipient::All,
-                    proto_id: proto_id1.clone(),
-                    data: data1.clone(),
-                })
-                .await;
+            chan1.send(network::SendMessage {
+                to: network::Recipient::All,
+                proto_id: proto_id1.clone(),
+                data: data1.clone(),
+            });
 
             let mut chan2 = net.channel(proto_id2.clone());
-            chan2
-                .send(network::SendMessage {
-                    to: network::Recipient::All,
-                    proto_id: proto_id2.clone(),
-                    data: data2.clone(),
-                })
-                .await;
+            chan2.send(network::SendMessage {
+                to: network::Recipient::All,
+                proto_id: proto_id2.clone(),
+                data: data2.clone(),
+            });
 
             for _ in 0..num {
                 let mssg2 = chan2.recv().await;
@@ -206,8 +199,7 @@ async fn net_tcp_two_party() {
                 to: network::Recipient::One(1),
                 proto_id: proto_id.clone(),
                 data: data.clone(),
-            })
-            .await;
+            });
 
             let mssg = chan.recv().await;
             assert_eq!(mssg.from, 1);
@@ -238,8 +230,7 @@ async fn net_tcp_two_party() {
             to: network::Recipient::One(0),
             proto_id,
             data,
-        })
-        .await;
+        });
 
         assert_eq!(stats.party(0).await.0, data_len);
         assert_eq!(stats.party(1).await, (0, 0));
@@ -272,8 +263,7 @@ async fn net_tcp_many_parties() {
                 to: network::Recipient::All,
                 proto_id: proto_id.clone(),
                 data: data.clone(),
-            })
-            .await;
+            });
 
             let mut recv_ids = vec![false; num as usize];
 
@@ -328,22 +318,18 @@ async fn net_tcp_many_parties_two_ids() {
         handles.push(spawn(async move {
             let (stats, net) = network::setup_tcp_network(pid, &addresses).await;
             let mut chan1 = net.channel(proto_id1.clone());
-            chan1
-                .send(network::SendMessage {
-                    to: network::Recipient::All,
-                    proto_id: proto_id1.clone(),
-                    data: data1.clone(),
-                })
-                .await;
+            chan1.send(network::SendMessage {
+                to: network::Recipient::All,
+                proto_id: proto_id1.clone(),
+                data: data1.clone(),
+            });
 
             let mut chan2 = net.channel(proto_id2.clone());
-            chan2
-                .send(network::SendMessage {
-                    to: network::Recipient::All,
-                    proto_id: proto_id2.clone(),
-                    data: data2.clone(),
-                })
-                .await;
+            chan2.send(network::SendMessage {
+                to: network::Recipient::All,
+                proto_id: proto_id2.clone(),
+                data: data2.clone(),
+            });
 
             for _ in 0..num {
                 let mssg2 = chan2.recv().await;

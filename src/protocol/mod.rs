@@ -75,7 +75,7 @@ pub struct ProtoChannel<S, R> {
 }
 
 impl<S: std::fmt::Debug, R> ProtoChannel<S, R> {
-    pub async fn send(&self, message: S) {
+    pub fn send(&self, message: S) {
         self.sender
             .send(message)
             .expect("Channel sender to be open.");
