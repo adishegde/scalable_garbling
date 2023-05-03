@@ -32,7 +32,7 @@ impl RandContext {
 }
 
 pub async fn rand(id: ProtocolID, context: RandContext) -> Vec<PackedShare> {
-    let chan = context.net_builder.channel(&id).await;
+    let mut chan = context.net_builder.channel(id.clone());
     let shares = {
         let mut rng = thread_rng();
         context.pss.rand(context.gf.as_ref(), &mut rng)
@@ -47,7 +47,7 @@ pub async fn rand(id: ProtocolID, context: RandContext) -> Vec<PackedShare> {
         .await;
     }
 
-    let sent_shares: Vec<_> = network::message_from_each_party(&chan, context.n)
+    let sent_shares: Vec<_> = network::message_from_each_party(&mut chan, context.n)
         .await
         .into_iter()
         .map(|d| context.gf.deserialize_element(&d))
@@ -85,7 +85,7 @@ impl ZeroContext {
 }
 
 pub async fn zero(id: ProtocolID, context: ZeroContext) -> Vec<PackedShare> {
-    let chan = context.net_builder.channel(&id).await;
+    let mut chan = context.net_builder.channel(id.clone());
     let shares = {
         let secrets = vec![context.gf.zero(); context.l];
         let mut rng = thread_rng();
@@ -101,7 +101,7 @@ pub async fn zero(id: ProtocolID, context: ZeroContext) -> Vec<PackedShare> {
         .await;
     }
 
-    let sent_shares: Vec<_> = network::message_from_each_party(&chan, context.n)
+    let sent_shares: Vec<_> = network::message_from_each_party(&mut chan, context.n)
         .await
         .into_iter()
         .map(|d| context.gf.deserialize_element(&d))
@@ -143,7 +143,7 @@ pub async fn randbit(
     share_coeffs: Arc<GFMatrix>,
     context: RandBitContext,
 ) -> Vec<PackedShare> {
-    let chan = context.net_builder.channel(&id).await;
+    let mut chan = context.net_builder.channel(id.clone());
     let shares: Vec<_> = {
         let mut rng = thread_rng();
         let secrets: Vec<_> = (0..context.l)
@@ -172,7 +172,7 @@ pub async fn randbit(
         .await;
     }
 
-    let sent_shares: Vec<_> = network::message_from_each_party(&chan, context.n)
+    let sent_shares: Vec<_> = network::message_from_each_party(&mut chan, context.n)
         .await
         .into_iter()
         .map(|d| context.gf.deserialize_element(&d))

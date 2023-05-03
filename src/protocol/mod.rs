@@ -1,10 +1,8 @@
 use crate::math::galois::GF;
 use crate::sharing::PackedSharing;
 use crate::PartyID;
-use async_channel::{unbounded, Receiver, Sender};
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 pub mod core;
 pub mod garble;
@@ -72,19 +70,18 @@ impl<'a> Iterator for ProtocolIDBuilder<'a> {
 }
 
 pub struct ProtoChannel<S, R> {
-    sender: Sender<S>,
-    receiver: Receiver<R>,
+    sender: UnboundedSender<S>,
+    receiver: UnboundedReceiver<R>,
 }
 
-impl<S, R> ProtoChannel<S, R> {
+impl<S: std::fmt::Debug, R> ProtoChannel<S, R> {
     pub async fn send(&self, message: S) {
         self.sender
             .send(message)
-            .await
             .expect("Channel sender to be open.");
     }
 
-    pub async fn recv(&self) -> R {
+    pub async fn recv(&mut self) -> R {
         self.receiver
             .recv()
             .await
@@ -92,68 +89,36 @@ impl<S, R> ProtoChannel<S, R> {
     }
 }
 
-pub struct ProtoChannelBuilder<S, R> {
-    worker_s: Sender<S>,
-    clients: Arc<RwLock<HashMap<ProtocolID, (Sender<R>, Receiver<R>)>>>,
+#[derive(Clone)]
+pub struct ProtoChannelBuilder {
+    worker_s: UnboundedSender<network::SendMessage>,
+    register_s: UnboundedSender<network::RegisterProtocol>,
 }
 
-impl<S, R> ProtoChannelBuilder<S, R> {
-    fn new(worker_task_s: Sender<S>) -> Self {
+impl ProtoChannelBuilder {
+    fn new(
+        worker_s: UnboundedSender<network::SendMessage>,
+        register_s: UnboundedSender<network::RegisterProtocol>,
+    ) -> Self {
         Self {
-            worker_s: worker_task_s,
-            clients: Arc::new(RwLock::new(HashMap::new())),
+            worker_s,
+            register_s,
         }
     }
 
-    async fn create_channel(&self, id: ProtocolID) -> (Sender<R>, Receiver<R>) {
-        let mut client_map = self.clients.write().await;
-        match client_map.get(&id) {
-            Some((sender, receiver)) => (sender.clone(), receiver.clone()),
-            None => {
-                let (sender, receiver) = unbounded();
-                client_map.insert(id, (sender.clone(), receiver.clone()));
-                (sender, receiver)
-            }
-        }
-    }
+    pub fn channel(
+        &self,
+        id: ProtocolID,
+    ) -> ProtoChannel<network::SendMessage, network::ReceivedMessage> {
+        let (sender, receiver) = unbounded_channel();
 
-    pub async fn channel(&self, id: &ProtocolID) -> ProtoChannel<S, R> {
-        {
-            let client_map = self.clients.read().await;
-            if let Some((_, receiver)) = client_map.get(id) {
-                return ProtoChannel {
-                    sender: self.worker_s.clone(),
-                    receiver: receiver.clone(),
-                };
-            }
-        }
-
-        let (_, receiver) = self.create_channel(id.clone()).await;
+        self.register_s
+            .send(network::RegisterProtocol(id, sender))
+            .unwrap();
 
         ProtoChannel {
             sender: self.worker_s.clone(),
             receiver,
-        }
-    }
-
-    async fn receiver_handle(&self, id: &ProtocolID) -> Sender<R> {
-        {
-            let client_map = self.clients.read().await;
-            if let Some((sender, _)) = client_map.get(id) {
-                return sender.clone();
-            }
-        }
-
-        let (sender, _) = self.create_channel(id.clone()).await;
-        sender
-    }
-}
-
-impl<S, R> Clone for ProtoChannelBuilder<S, R> {
-    fn clone(&self) -> Self {
-        Self {
-            worker_s: self.worker_s.clone(),
-            clients: self.clients.clone(),
         }
     }
 }

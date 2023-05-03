@@ -22,7 +22,7 @@ async fn net_local_two_party() {
 
         spawn(async move {
             let (stats, net) = comms1;
-            let chan = net.channel(&proto_id).await;
+            let mut chan = net.channel(proto_id.clone());
             chan.send(network::SendMessage {
                 to: network::Recipient::One(1),
                 proto_id: proto_id.clone(),
@@ -37,14 +37,14 @@ async fn net_local_two_party() {
 
             let data_len = data.len() as u64;
 
-            assert_eq!(stats.party(1).await, (data_len, data_len));
+            assert_eq!(stats.party(1).await.0, data_len);
             assert_eq!(stats.party(0).await, (0, 0));
         })
     };
 
     let party2 = spawn(async move {
         let (stats, net) = comms2;
-        let chan = net.channel(&proto_id).await;
+        let mut chan = net.channel(proto_id.clone());
         let mssg = chan.recv().await;
         assert_eq!(mssg.from, 0);
         assert_eq!(mssg.proto_id, proto_id);
@@ -52,7 +52,7 @@ async fn net_local_two_party() {
 
         let data_len = data.len() as u64;
 
-        assert_eq!(stats.party(0).await, (data_len, data_len));
+        assert_eq!(stats.party(0).await.0, data_len);
         assert_eq!(stats.party(1).await, (0, 0));
 
         chan.send(network::SendMessage {
@@ -62,7 +62,7 @@ async fn net_local_two_party() {
         })
         .await;
 
-        assert_eq!(stats.party(0).await, (data_len, data_len));
+        assert_eq!(stats.party(0).await.0, data_len);
         assert_eq!(stats.party(1).await, (0, 0));
     });
 
@@ -84,7 +84,7 @@ async fn net_local_many_parties() {
         let pid: PartyID = pid.try_into().unwrap();
 
         handles.push(spawn(async move {
-            let chan = net.channel(&proto_id).await;
+            let mut chan = net.channel(proto_id.clone());
             chan.send(network::SendMessage {
                 to: network::Recipient::All,
                 proto_id: proto_id.clone(),
@@ -111,7 +111,7 @@ async fn net_local_many_parties() {
                 if i == pid {
                     assert_eq!(stats.party(i).await, (0, 0));
                 } else {
-                    assert_eq!(stats.party(i).await, (data_len, data_len));
+                    assert_eq!(stats.party(i).await.0, data_len);
                 }
             }
         }));
@@ -140,7 +140,7 @@ async fn net_local_many_parties_two_ids() {
         let pid: PartyID = pid.try_into().unwrap();
 
         handles.push(spawn(async move {
-            let chan1 = net.channel(&proto_id1).await;
+            let mut chan1 = net.channel(proto_id1.clone());
             chan1
                 .send(network::SendMessage {
                     to: network::Recipient::All,
@@ -149,7 +149,7 @@ async fn net_local_many_parties_two_ids() {
                 })
                 .await;
 
-            let chan2 = net.channel(&proto_id2).await;
+            let mut chan2 = net.channel(proto_id2.clone());
             chan2
                 .send(network::SendMessage {
                     to: network::Recipient::All,
@@ -173,7 +173,7 @@ async fn net_local_many_parties_two_ids() {
                 if i == pid {
                     assert_eq!(stats.party(i).await, (0, 0));
                 } else {
-                    assert_eq!(stats.party(i).await, (data_len, data_len));
+                    assert_eq!(stats.party(i).await.0, data_len);
                 }
             }
         }));
@@ -201,7 +201,7 @@ async fn net_tcp_two_party() {
 
         spawn(async move {
             let (stats, net) = network::setup_tcp_network(0, &addresses).await;
-            let chan = net.channel(&proto_id).await;
+            let mut chan = net.channel(proto_id.clone());
             chan.send(network::SendMessage {
                 to: network::Recipient::One(1),
                 proto_id: proto_id.clone(),
@@ -223,7 +223,7 @@ async fn net_tcp_two_party() {
 
     let party2 = spawn(async move {
         let (stats, net) = network::setup_tcp_network(1, &addresses).await;
-        let chan = net.channel(&proto_id).await;
+        let mut chan = net.channel(proto_id.clone());
         let mssg = chan.recv().await;
         assert_eq!(mssg.from, 0);
         assert_eq!(mssg.proto_id, proto_id);
@@ -267,7 +267,7 @@ async fn net_tcp_many_parties() {
 
         handles.push(spawn(async move {
             let (stats, net) = network::setup_tcp_network(pid, &addresses).await;
-            let chan = net.channel(&proto_id).await;
+            let mut chan = net.channel(proto_id.clone());
             chan.send(network::SendMessage {
                 to: network::Recipient::All,
                 proto_id: proto_id.clone(),
@@ -327,7 +327,7 @@ async fn net_tcp_many_parties_two_ids() {
 
         handles.push(spawn(async move {
             let (stats, net) = network::setup_tcp_network(pid, &addresses).await;
-            let chan1 = net.channel(&proto_id1).await;
+            let mut chan1 = net.channel(proto_id1.clone());
             chan1
                 .send(network::SendMessage {
                     to: network::Recipient::All,
@@ -336,7 +336,7 @@ async fn net_tcp_many_parties_two_ids() {
                 })
                 .await;
 
-            let chan2 = net.channel(&proto_id2).await;
+            let mut chan2 = net.channel(proto_id2.clone());
             chan2
                 .send(network::SendMessage {
                     to: network::Recipient::All,

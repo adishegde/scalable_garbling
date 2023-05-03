@@ -139,11 +139,11 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
     std::io::stdout().flush().unwrap();
 
     let bench_proto = b"benchmark communication protocol".to_vec();
-    let chan = net.channel(&bench_proto).await;
+    let mut chan = net.channel(bench_proto.clone());
     bench_data["garbling"] = json::JsonValue::new_array();
 
     for i in 0..opts.reps {
-        network::sync(bench_proto.clone(), &chan, n as usize).await;
+        network::sync(bench_proto.clone(), &mut chan, n as usize).await;
         let preproc = preproc.clone();
         let context = context.clone();
         let gproto_id = b"".to_vec();
@@ -193,7 +193,7 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
                 benchmarks: json::JsonValue::new_array()
             };
 
-            network::message_from_each_party(&chan, n as usize)
+            network::message_from_each_party(&mut chan, n as usize)
                 .await
                 .into_iter()
                 .for_each(|data| {

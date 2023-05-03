@@ -1,35 +1,39 @@
 use super::{ProtoChannel, ProtoChannelBuilder, ProtocolID};
 use crate::PartyID;
-use async_channel::{unbounded, Receiver};
 use futures_lite::stream::StreamExt;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::RwLock;
 use tokio::task::spawn;
 use vint64;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Recipient {
     One(PartyID),
     All,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SendMessage {
     pub proto_id: ProtocolID,
     pub to: Recipient,
     pub data: Vec<u8>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ReceivedMessage {
     pub proto_id: ProtocolID,
     pub from: PartyID,
     pub data: Vec<u8>,
 }
+
+#[derive(Debug)]
+pub struct RegisterProtocol(pub ProtocolID, pub UnboundedSender<ReceivedMessage>);
 
 #[derive(Clone)]
 pub struct Stats(Vec<Arc<RwLock<(u64, u64)>>>);
@@ -67,7 +71,7 @@ impl Stats {
     }
 }
 
-pub type NetworkChannelBuilder = ProtoChannelBuilder<SendMessage, ReceivedMessage>;
+pub type NetworkChannelBuilder = ProtoChannelBuilder;
 pub type NetworkChannel = ProtoChannel<SendMessage, ReceivedMessage>;
 
 pub async fn setup_tcp_network(
@@ -95,8 +99,10 @@ pub async fn setup_tcp_network(
     //   net_inp -> tcp_stream[i] (router task)
     //   tcp_stream[sender] -> proto_channel (per party receiver task)
     //   proto_channel -> mssg (using channel).
-    let (net_inp_s, net_inp_r) = unbounded::<SendMessage>();
-    let channel_builder = ProtoChannelBuilder::new(net_inp_s);
+    let (net_inp_s, net_inp_r) = unbounded_channel();
+    let (net_register_s, mut net_register_r) = unbounded_channel();
+    let (proto_router_s, mut proto_router_r) = unbounded_channel();
+    let channel_builder = ProtoChannelBuilder::new(net_inp_s, net_register_s);
     let stats = Stats::new(num_parties as usize);
 
     // net_inp -> tcp_stream[i].
@@ -104,7 +110,7 @@ pub async fn setup_tcp_network(
         party_id,
         net_inp_r,
         write_streams,
-        channel_builder.clone(),
+        proto_router_s.clone(),
     ));
 
     // Start receiver task for each party.
@@ -114,7 +120,7 @@ pub async fn setup_tcp_network(
             spawn(party_receive_router(
                 pid.try_into().unwrap(),
                 stream,
-                channel_builder.clone(),
+                proto_router_s.clone(),
                 stats.clone(),
             ));
         } else if pid != (party_id as usize) {
@@ -122,79 +128,173 @@ pub async fn setup_tcp_network(
         }
     }
 
+    spawn(async move {
+        let mut buffer = HashMap::new();
+        let mut registered: HashMap<Vec<u8>, UnboundedSender<ReceivedMessage>> = HashMap::new();
+
+        loop {
+            tokio::select! {
+                Some(mssg) = proto_router_r.recv() => {
+                    match registered.get(&mssg.proto_id) {
+                        Some(sender) => {
+                            if sender.send(mssg.clone()).is_err() {
+                                registered.remove(&mssg.proto_id);
+                                buffer
+                                    .entry(mssg.proto_id.clone())
+                                    .or_insert(Vec::new())
+                                    .push(mssg);
+                            }
+                        },
+                        None => {
+                            buffer.entry(mssg.proto_id.clone()).or_insert(Vec::new()).push(mssg);
+                        }
+                    }
+                },
+                Some(RegisterProtocol(id, sender)) = net_register_r.recv() => {
+                    if let Some(mssgs) = buffer.remove(&id) {
+                        for mssg in mssgs {
+                            sender.send(mssg).unwrap();
+                        }
+                    }
+                    registered.insert(id, sender);
+                },
+                else => { break }
+            }
+        }
+    });
+
     (stats, channel_builder)
 }
 
 pub async fn setup_local_network(num_parties: usize) -> Vec<(Stats, NetworkChannelBuilder)> {
-    let mut stats = Vec::with_capacity(num_parties);
+    let (net_inp_s, mut net_inp_r) = unbounded_channel();
+    let (register_s, mut register_r) = unbounded_channel();
+
+    let stats: Vec<_> = (0..num_parties).map(|_| Stats::new(num_parties)).collect();
+
     let mut net_builders = Vec::with_capacity(num_parties);
-    let mut router_r = Vec::with_capacity(num_parties);
-
-    for _ in 0..num_parties {
-        let (s, r) = unbounded::<SendMessage>();
-        router_r.push(r);
-        net_builders.push(ProtoChannelBuilder::new(s));
-        stats.push(Stats::new(num_parties));
-    }
-
-    for pid in 0..num_parties {
-        let net_builders = net_builders.clone();
-        let mut party_router_r = router_r[pid].clone();
-        let stats = stats.clone();
-        let pid: PartyID = pid.try_into().unwrap();
+    for i in 0..num_parties {
+        let (party_s, mut party_r) = unbounded_channel::<SendMessage>();
+        let (reg_party_s, mut reg_party_r) = unbounded_channel();
+        let net_inp_s = net_inp_s.clone();
+        let register_s = register_s.clone();
 
         spawn(async move {
-            while let Some(mssg) = party_router_r.next().await {
-                let data_len = mssg.data.len();
+            while let Some(mssg) = party_r.recv().await {
+                net_inp_s.send((i, mssg)).unwrap();
+            }
+        });
 
-                match mssg.to {
-                    Recipient::One(rid) => {
-                        if rid != pid {
-                            stats[rid as usize]
-                                .increment(pid, data_len as u64, data_len as u64)
-                                .await;
-                        }
+        spawn(async move {
+            while let Some(RegisterProtocol(id, sender)) = reg_party_r.recv().await {
+                register_s.send((i, id, sender)).unwrap();
+            }
+        });
 
-                        let sender = net_builders[rid as usize]
-                            .receiver_handle(&mssg.proto_id)
-                            .await;
-                        sender
-                            .send(ReceivedMessage {
-                                from: pid,
-                                proto_id: mssg.proto_id,
-                                data: mssg.data,
-                            })
-                            .await
-                            .expect("Protocol channel sender is open.");
-                    }
-                    Recipient::All => {
-                        for rid in 0..num_parties {
-                            if rid != pid as usize {
-                                stats[rid]
-                                    .increment(pid, data_len as u64, data_len as u64)
+        net_builders.push(ProtoChannelBuilder::new(party_s, reg_party_s));
+    }
+
+    let res_stats = stats.clone();
+
+    spawn(async move {
+        let mut buffers: Vec<_> = (0..num_parties).map(|_| HashMap::new()).collect();
+        let mut registered: Vec<HashMap<ProtocolID, UnboundedSender<ReceivedMessage>>> =
+            (0..num_parties).map(|_| HashMap::new()).collect();
+
+        loop {
+            tokio::select! {
+                Some((from, mssg)) = net_inp_r.recv() => {
+                    let recv_mssg = ReceivedMessage {
+                        proto_id: mssg.proto_id,
+                        from: from.try_into().unwrap(),
+                        data: mssg.data
+                    };
+
+                    match mssg.to {
+                        Recipient::One(to) => {
+                            if to != recv_mssg.from {
+                                stats[to as usize]
+                                    .increment(
+                                        from.try_into().unwrap(),
+                                        recv_mssg.data.len() as u64,
+                                        (recv_mssg.data.len() + recv_mssg.proto_id.len()) as u64
+                                    )
                                     .await;
                             }
 
-                            let sender = net_builders[rid].receiver_handle(&mssg.proto_id).await;
-                            sender
-                                .send(ReceivedMessage {
-                                    from: pid.try_into().unwrap(),
-                                    proto_id: mssg.proto_id.clone(),
-                                    data: mssg.data.clone(),
-                                })
-                                .await
-                                .expect("Protocol channel sender is open.");
+                            match registered[to as usize].get(&recv_mssg.proto_id) {
+                                Some(sender) => {
+                                    if sender.send(recv_mssg.clone()).is_err() {
+                                        registered[to as usize].remove(&recv_mssg.proto_id);
+                                        buffers[to as usize]
+                                            .entry(recv_mssg.proto_id.clone())
+                                            .or_insert(Vec::new())
+                                            .push(recv_mssg);
+                                    }
+                                },
+                                None => {
+                                    buffers[to as usize]
+                                        .entry(recv_mssg.proto_id.clone())
+                                        .or_insert(Vec::new())
+                                        .push(recv_mssg);
+                                }
+                            }
+                        },
+                        Recipient::All => {
+                            for to in 0..num_parties {
+                                let recv_mssg = recv_mssg.clone();
+
+                                if to != from {
+                                    stats[to as usize]
+                                        .increment(
+                                            from.try_into().unwrap(),
+                                            recv_mssg.data.len() as u64,
+                                            (recv_mssg.data.len() + recv_mssg.proto_id.len()) as u64
+                                        )
+                                        .await;
+                                }
+
+                                match registered[to as usize].get(&recv_mssg.proto_id) {
+                                    Some(sender) => {
+                                        if sender.send(recv_mssg.clone()).is_err() {
+                                            registered[to as usize].remove(&recv_mssg.proto_id);
+                                            buffers[to as usize]
+                                                .entry(recv_mssg.proto_id.clone())
+                                                .or_insert(Vec::new())
+                                                .push(recv_mssg);
+                                        }
+                                    },
+                                    None => {
+                                        buffers[to as usize]
+                                            .entry(recv_mssg.proto_id.clone())
+                                            .or_insert(Vec::new())
+                                            .push(recv_mssg);
+                                    }
+                                }
+                            }
                         }
                     }
-                }
+                },
+                Some((i, id, sender)) = register_r.recv() => {
+                    if let Some(mssgs) = buffers[i].remove(&id) {
+                        for mssg in mssgs {
+                            sender.send(mssg).unwrap();
+                        }
+                    }
+                    registered[i].insert(id, sender);
+                },
+                else => { break }
             }
-        });
-    }
+        }
+    });
 
-    stats.into_iter().zip(net_builders.into_iter()).collect()
+    res_stats
+        .into_iter()
+        .zip(net_builders.into_iter())
+        .collect()
 }
 
-pub async fn sync(proto_id: ProtocolID, chan: &NetworkChannel, num_parties: usize) {
+pub async fn sync(proto_id: ProtocolID, chan: &mut NetworkChannel, num_parties: usize) {
     let data = b"sync".to_vec();
 
     chan.send(SendMessage {
@@ -211,7 +311,10 @@ pub async fn sync(proto_id: ProtocolID, chan: &NetworkChannel, num_parties: usiz
 /// the party ID.
 /// If multiple messages are received from the same party, the first one is returned and the latter
 /// ones are dropped.
-pub async fn message_from_each_party(chan: &NetworkChannel, num_parties: usize) -> Vec<Vec<u8>> {
+pub async fn message_from_each_party(
+    chan: &mut NetworkChannel,
+    num_parties: usize,
+) -> Vec<Vec<u8>> {
     let mut mssgs = vec![Vec::new(); num_parties];
     let mut has_sent = vec![false; num_parties];
     let mut counter = 0;
@@ -311,24 +414,22 @@ async fn connect_to_peers(party_id: PartyID, addresses: &[String]) -> Vec<Option
 // Send messages to each party over the appropriate TCP socket.
 async fn send_router(
     party_id: PartyID,
-    mut incoming: Receiver<SendMessage>,
+    mut incoming: UnboundedReceiver<SendMessage>,
     mut tcp_streams: Vec<Option<OwnedWriteHalf>>,
-    channel_builder: NetworkChannelBuilder,
+    proto_router_s: UnboundedSender<ReceivedMessage>,
 ) {
     let num_parties = tcp_streams.len();
 
-    while let Some(mssg) = incoming.next().await {
+    while let Some(mssg) = incoming.recv().await {
         match mssg.to {
             Recipient::One(rid) => {
                 if rid == party_id {
-                    let sender = channel_builder.receiver_handle(&mssg.proto_id).await;
-                    sender
+                    proto_router_s
                         .send(ReceivedMessage {
                             from: party_id,
                             proto_id: mssg.proto_id,
                             data: mssg.data,
                         })
-                        .await
                         .expect("Protocol channel sender is open.");
                 } else {
                     send_to_party(
@@ -349,15 +450,12 @@ async fn send_router(
                     let data = data.clone();
 
                     if rid as PartyID == party_id {
-                        let channel_builder = channel_builder.clone();
-                        let sender = channel_builder.receiver_handle(&proto_id).await;
-                        sender
+                        proto_router_s
                             .send(ReceivedMessage {
                                 from: party_id,
                                 proto_id: proto_id.clone(),
                                 data: data.clone(),
                             })
-                            .await
                             .expect("Protocol channel sender is open.");
                     } else {
                         send_to_party(
@@ -398,7 +496,7 @@ async fn send_to_party(proto_id: &ProtocolID, data: &[u8], stream: &mut OwnedWri
 async fn party_receive_router(
     pid: PartyID,
     mut incoming: OwnedReadHalf,
-    channel_builder: NetworkChannelBuilder,
+    proto_router_s: UnboundedSender<ReceivedMessage>,
     stats: Stats,
 ) {
     let mut bytes = [0; 9];
@@ -430,9 +528,7 @@ async fn party_receive_router(
             data,
         };
 
-        let sender = channel_builder.receiver_handle(&recv_mssg.proto_id).await;
-
-        if let Err(_) = sender.send(recv_mssg).await {
+        if let Err(_) = proto_router_s.send(recv_mssg) {
             break;
         }
 

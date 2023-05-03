@@ -26,7 +26,7 @@ pub async fn reduce_degree(
     // The better the hash quality the better the load balancing will be.
     let leader: PartyID = (hash(&id) % (context.n as u64)).try_into().unwrap();
 
-    let chan = context.net_builder.channel(&id).await;
+    let mut chan = context.net_builder.channel(id.clone());
 
     let x_recon = x + random + zero;
     chan.send(SendMessage {
@@ -37,7 +37,7 @@ pub async fn reduce_degree(
     .await;
 
     if context.id == leader {
-        let shares: Vec<_> = network::message_from_each_party(&chan, context.n)
+        let shares: Vec<_> = network::message_from_each_party(&mut chan, context.n)
             .await
             .into_iter()
             .map(|d| context.gf.deserialize_element(&d))
@@ -72,7 +72,7 @@ pub async fn batch_reduce_degree(
 ) -> Vec<PackedShare> {
     let leader: PartyID = (hash(&id) % (context.n as u64)).try_into().unwrap();
 
-    let chan = context.net_builder.channel(&id).await;
+    let mut chan = context.net_builder.channel(id.clone());
 
     let x_recon: Vec<_> = x
         .iter()
@@ -87,7 +87,7 @@ pub async fn batch_reduce_degree(
     .await;
 
     if context.id == leader {
-        let shares_list: Vec<_> = network::message_from_each_party(&chan, context.n)
+        let shares_list: Vec<_> = network::message_from_each_party(&mut chan, context.n)
             .await
             .into_iter()
             .map(|d| context.gf.deserialize_vec(&d))
@@ -197,7 +197,7 @@ pub async fn trans(
     // Attempt to load balance leader's work across all parties as in the degree reduction
     // protocol.
     let leader: PartyID = (hash(&id) % (context.n as u64)).try_into().unwrap();
-    let chan = context.net_builder.channel(&id).await;
+    let mut chan = context.net_builder.channel(id.clone());
 
     let x_recon = x + random_n;
     chan.send(SendMessage {
@@ -208,7 +208,7 @@ pub async fn trans(
     .await;
 
     if context.id == leader {
-        let shares: Vec<_> = network::message_from_each_party(&chan, context.n)
+        let shares: Vec<_> = network::message_from_each_party(&mut chan, context.n)
             .await
             .into_iter()
             .map(|d| context.gf.deserialize_element(&d))
@@ -250,7 +250,7 @@ pub async fn batch_trans(
     context: MPCContext,
 ) -> Vec<PackedShare> {
     let leader: PartyID = (hash(&id) % (context.n as u64)).try_into().unwrap();
-    let chan = context.net_builder.channel(&id).await;
+    let mut chan = context.net_builder.channel(id.clone());
 
     debug_assert_eq!(x.len(), randoms.len());
     debug_assert_eq!(x.len(), randoms_n.len());
@@ -269,7 +269,7 @@ pub async fn batch_trans(
     .await;
 
     if context.id == leader {
-        let shares_list: Vec<_> = network::message_from_each_party(&chan, context.n)
+        let shares_list: Vec<_> = network::message_from_each_party(&mut chan, context.n)
             .await
             .into_iter()
             .map(|d| context.gf.deserialize_vec(&d))
@@ -536,7 +536,7 @@ pub async fn randtrans(
     debug_assert_eq!(randoms.len(), context.n + context.t);
     debug_assert_eq!(zeros.len(), 2 * context.n);
 
-    let chan = context.net_builder.channel(&id).await;
+    let mut chan = context.net_builder.channel(id.clone());
 
     let (shares, shares_n) = randtrans_comp(&randoms, &zeros, &transform, &context);
 
@@ -549,14 +549,15 @@ pub async fn randtrans(
         .await;
     }
 
-    let (shares, shares_n): (Vec<_>, Vec<_>) = network::message_from_each_party(&chan, context.n)
-        .await
-        .into_iter()
-        .map(|d| {
-            let vals = context.gf.deserialize_vec(&d);
-            (vals[0], vals[1])
-        })
-        .unzip();
+    let (shares, shares_n): (Vec<_>, Vec<_>) =
+        network::message_from_each_party(&mut chan, context.n)
+            .await
+            .into_iter()
+            .map(|d| {
+                let vals = context.gf.deserialize_vec(&d);
+                (vals[0], vals[1])
+            })
+            .unzip();
 
     context
         .pss
@@ -584,7 +585,7 @@ pub async fn batch_randtrans(
     debug_assert_eq!(randoms.len(), batch_size * rands_per_batch);
     debug_assert_eq!(zeros.len(), batch_size * zeros_per_batch);
 
-    let chan = context.net_builder.channel(&id).await;
+    let mut chan = context.net_builder.channel(id.clone());
 
     let mut shares_list: Vec<_> = (0..context.n)
         .map(|_| Vec::with_capacity(context.n))
@@ -611,7 +612,7 @@ pub async fn batch_randtrans(
         .await;
     }
 
-    let shares_list: Vec<_> = network::message_from_each_party(&chan, context.n)
+    let shares_list: Vec<_> = network::message_from_each_party(&mut chan, context.n)
         .await
         .into_iter()
         .map(|d| context.gf.deserialize_vec(&d))
