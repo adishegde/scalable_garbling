@@ -386,7 +386,7 @@ pub async fn garble(
 
     let num_trans_per_wire = 2 * mpcctx.lpn_key_len + 1;
     let num_subproto =
-        context.out_rtrans.len() + context.inp_rtrans.len() + num_blocks + num_gate_blocks;
+        context.out_rtrans.len() + context.inp_rtrans.len() + num_blocks + 2 * num_gate_blocks + 1;
     let mut id_gen = ProtocolIDBuilder::new(&id, num_subproto as u64);
 
     // Run randtrans for transforming keys and masks.
@@ -521,7 +521,8 @@ pub async fn garble(
                     inp_trans_stream.next().await.unwrap(),
                     inp_trans_stream.next().await.unwrap(),
                 ];
-                let sub_id = id_gen.next().unwrap();
+                let sub_id_trans = id_gen.next().unwrap();
+                let sub_id_garble = id_gen.next().unwrap();
                 let num = 4 * mpcctx.lpn_mssg_len;
                 let randoms = preproc.randoms.split_off(preproc.randoms.len() - num);
                 let zeros = preproc.zeros.split_off(preproc.zeros.len() - num);
@@ -529,20 +530,21 @@ pub async fn garble(
                 let ginf = ginf.to_owned();
 
                 gc_handles.push(spawn(async move {
-                    let (inp_masks, inp_keys) = transform_inputs(
-                        sub_id.clone(),
-                        gid,
-                        &ginf,
-                        &masks,
-                        &keys,
-                        rtrans,
-                        &context,
-                    )
-                    .await;
+                    let (inp_masks, inp_keys) =
+                        transform_inputs(sub_id_trans, gid, &ginf, &masks, &keys, rtrans, &context)
+                            .await;
 
                     garble_xor(
-                        sub_id, gid, inp_masks, inp_keys, out_mask, out_key, randoms, zeros,
-                        errors, context,
+                        sub_id_garble,
+                        gid,
+                        inp_masks,
+                        inp_keys,
+                        out_mask,
+                        out_key,
+                        randoms,
+                        zeros,
+                        errors,
+                        context,
                     )
                     .await
                 }));
@@ -552,7 +554,8 @@ pub async fn garble(
                     inp_trans_stream.next().await.unwrap(),
                     inp_trans_stream.next().await.unwrap(),
                 ];
-                let sub_id = id_gen.next().unwrap();
+                let sub_id_trans = id_gen.next().unwrap();
+                let sub_id_garble = id_gen.next().unwrap();
                 let num = 4 * mpcctx.lpn_mssg_len;
                 let randoms = preproc.randoms.split_off(preproc.randoms.len() - num - 1);
                 let zeros = preproc.zeros.split_off(preproc.zeros.len() - num - 1);
@@ -560,27 +563,29 @@ pub async fn garble(
                 let ginf = ginf.to_owned();
 
                 gc_handles.push(spawn(async move {
-                    let (inp_masks, inp_keys) = transform_inputs(
-                        sub_id.clone(),
-                        gid,
-                        &ginf,
-                        &masks,
-                        &keys,
-                        rtrans,
-                        &context,
-                    )
-                    .await;
+                    let (inp_masks, inp_keys) =
+                        transform_inputs(sub_id_trans, gid, &ginf, &masks, &keys, rtrans, &context)
+                            .await;
 
                     garble_and(
-                        sub_id, gid, inp_masks, inp_keys, out_mask, out_key, randoms, zeros,
-                        errors, context,
+                        sub_id_garble,
+                        gid,
+                        inp_masks,
+                        inp_keys,
+                        out_mask,
+                        out_key,
+                        randoms,
+                        zeros,
+                        errors,
+                        context,
                     )
                     .await
                 }));
             }
             PackedGate::Inv(ginf) => {
                 let rtrans = [inp_trans_stream.next().await.unwrap()];
-                let sub_id = id_gen.next().unwrap();
+                let sub_id_trans = id_gen.next().unwrap();
+                let sub_id_garble = id_gen.next().unwrap();
                 let num = 2 * mpcctx.lpn_mssg_len;
                 let randoms = preproc.randoms.split_off(preproc.randoms.len() - num);
                 let zeros = preproc.zeros.split_off(preproc.zeros.len() - num);
@@ -588,22 +593,23 @@ pub async fn garble(
                 let ginf = ginf.to_owned();
 
                 gc_handles.push(spawn(async move {
-                    let (inp_masks, inp_keys) = transform_inputs(
-                        sub_id.clone(),
-                        gid,
-                        &ginf,
-                        &masks,
-                        &keys,
-                        rtrans,
-                        &context,
-                    )
-                    .await;
+                    let (inp_masks, inp_keys) =
+                        transform_inputs(sub_id_trans, gid, &ginf, &masks, &keys, rtrans, &context)
+                            .await;
 
                     let inp_mask = inp_masks[0];
                     let inp_key = inp_keys.into_iter().next().unwrap();
 
                     garble_inv(
-                        sub_id, gid, inp_mask, inp_key, out_mask, out_key, randoms, zeros, errors,
+                        sub_id_garble,
+                        gid,
+                        inp_mask,
+                        inp_key,
+                        out_mask,
+                        out_key,
+                        randoms,
+                        zeros,
+                        errors,
                         context,
                     )
                     .await
@@ -722,8 +728,9 @@ async fn garble_and(
 
     // Compute product of input masks.
     // Will be used to compute the garbled table later.
+    let mut id_gen = ProtocolIDBuilder::new(&id, 2);
     let mask_prod = core::mult(
-        id.clone(),
+        id_gen.next().unwrap(),
         inp_masks[0],
         inp_masks[1],
         randoms.pop().unwrap(),
