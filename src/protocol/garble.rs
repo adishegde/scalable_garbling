@@ -7,13 +7,13 @@ use crate::math;
 use crate::math::galois::{GFElement, GFMatrix, GF};
 use crate::math::Combination;
 use crate::sharing::{PackedShare, PackedSharing};
-use crate::spawn;
+use futures_lite::stream::StreamExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha12Rng;
 use sha2::{Digest, Sha256};
-use smol::stream::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::task::spawn;
 
 struct WireSelector {
     lookup: HashMap<WireID, usize>,
@@ -427,9 +427,9 @@ pub async fn garble(
 
     // Transform masks and keys for output wire of each gate.
     let mut out_trans_handles = Vec::with_capacity(num_blocks);
-    let mut out_rtrans_stream = smol::stream::iter(out_rtrans_handles)
-        .then(|fut| async { fut.await })
-        .map(|shares| smol::stream::iter(shares))
+    let mut out_rtrans_stream = futures_lite::stream::iter(out_rtrans_handles)
+        .then(|fut| async { fut.await.unwrap() })
+        .map(|shares| futures_lite::stream::iter(shares))
         .flatten()
         .boxed();
 
@@ -471,7 +471,7 @@ pub async fn garble(
     ];
 
     for handle in out_trans_handles {
-        let mut shares = handle.await;
+        let mut shares = handle.await.unwrap();
         masks.push(shares.pop().unwrap());
 
         for i in 0..2 {
@@ -496,9 +496,9 @@ pub async fn garble(
     let keys = Arc::new(keys);
 
     // Transform inputs to gates and compute garbled circuit.
-    let mut inp_trans_stream = smol::stream::iter(inp_rtrans_handles)
-        .then(|fut| async { fut.await })
-        .map(|shares| smol::stream::iter(shares))
+    let mut inp_trans_stream = futures_lite::stream::iter(inp_rtrans_handles)
+        .then(|fut| async { fut.await.unwrap() })
+        .map(|shares| futures_lite::stream::iter(shares))
         .flatten()
         .boxed();
 
@@ -614,7 +614,7 @@ pub async fn garble(
 
     let mut gc_gates = Vec::with_capacity(circ.gates().len());
     for handle in gc_handles {
-        gc_gates.push(handle.await);
+        gc_gates.push(handle.await.unwrap());
     }
 
     GarbledCircuit { gates: gc_gates }
@@ -668,7 +668,7 @@ async fn transform_inputs<const N: usize>(
     let mut trans_keys = [(); N].map(|_| [Vec::new(), Vec::new()]);
 
     for (i, handle) in handles.into_iter().enumerate() {
-        let mut shares = handle.await;
+        let mut shares = handle.await.unwrap();
         trans_masks[i] = shares.pop().unwrap();
         trans_keys[i][1] = shares.split_off(mpcctx.lpn_key_len);
         trans_keys[i][0] = shares;

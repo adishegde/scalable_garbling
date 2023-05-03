@@ -204,7 +204,8 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let opts: Garble = argh::from_env();
 
     let ipaddrs: Vec<_> = {
@@ -220,5 +221,5 @@ fn main() {
         circ.pack(opts.packing_param)
     };
 
-    scalable_mpc::block_on(benchmark(circ, ipaddrs, opts));
+    benchmark(circ, ipaddrs, opts).await;
 }

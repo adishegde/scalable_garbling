@@ -1,10 +1,10 @@
 use crate::math::galois::GF;
 use crate::sharing::PackedSharing;
 use crate::PartyID;
-use smol::channel::{unbounded, Receiver, Sender};
-use smol::lock::RwLock;
+use async_channel::{unbounded, Receiver, Sender};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub mod core;
 pub mod garble;
