@@ -383,24 +383,17 @@ pub async fn preproc(
     };
 
     let errors = {
-        let mut x = Vec::with_capacity(2 * num_errors);
-        for _ in 0..(2 * num_errors) {
-            x.push(rbit_shares.next().await.unwrap());
-        }
-        let y = x.split_off(num_errors);
-
-        let mut randoms = Vec::with_capacity(num_errors);
+        let mut handles = Vec::new();
         for _ in 0..num_errors {
-            randoms.push(rand_shares.next().await.unwrap());
-        }
+            let x = rbit_shares.next().await.unwrap();
+            let y = rbit_shares.next().await.unwrap();
+            let r = rand_shares.next().await.unwrap();
+            let z = zero_shares.next().await.unwrap();
+            let sub_id = id_gen.next().unwrap();
 
-        let mut zeros = Vec::with_capacity(num_errors);
-        for _ in 0..num_errors {
-            zeros.push(zero_shares.next().await.unwrap());
+            handles.push(spawn(core::mult(sub_id, x, y, r, z, context.clone())));
         }
-
-        let sub_id = id_gen.next().unwrap();
-        core::batch_mult(sub_id, x, y, randoms, zeros, context.clone()).await
+        futures_lite::stream::iter(handles).then(|fut| async { fut.await.unwrap() })
     };
 
     let masks = {
@@ -438,6 +431,6 @@ pub async fn preproc(
         keys,
         randoms: rand_shares.collect().await,
         zeros: zero_shares.collect().await,
-        errors,
+        errors: errors.collect().await,
     }
 }
