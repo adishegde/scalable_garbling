@@ -24,7 +24,4 @@ tokio = { version = "1.28.0", features = ["full"] }
 vint64 = "1.0.1"
 
 [profile.release]
-ltu = true
-
-[env]
-RUSTFLAGS="-C target-cpu=native"
+lto = true

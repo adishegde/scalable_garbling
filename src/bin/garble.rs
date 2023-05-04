@@ -71,11 +71,11 @@ struct Garble {
     lpn_error_bias: usize,
 
     /// length of LPN key
-    #[argh(option, default = "246")]
+    #[argh(option, default = "127")]
     lpn_key_len: usize,
 
     /// length of expanded LPN pseudorandomness
-    #[argh(option, default = "721")]
+    #[argh(option, default = "555")]
     lpn_mssg_len: usize,
 
     /// number of repetitions

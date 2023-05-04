@@ -7,7 +7,7 @@ use crate::math::galois::{GFMatrix, GF};
 use crate::math::utils;
 use crate::sharing::{PackedShare, PackedSharing};
 use crate::PartyID;
-use rand::{thread_rng, Rng};
+use rand::{thread_rng, Rng, SeedableRng};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -217,30 +217,45 @@ impl PreProc {
         let num_gate_blocks = circ.gates().len();
         let num_blocks = num_circ_inp_blocks + num_gate_blocks;
 
-        let mut rng = rand::rngs::mock::StepRng::new(seed, 1);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut rand_gen = {
+            let small_pool: Vec<_> = (0..100)
+                .map(|_| context.pss.rand(context.gf.as_ref(), &mut rng)[id as usize])
+                .collect();
+            let mut iter = small_pool.into_iter().cycle();
+            move || iter.next().unwrap()
+        };
+        let mut zero_n_gen = {
+            let secrets = vec![context.gf.zero(); context.l];
+            let small_pool: Vec<_> = (0..100)
+                .map(|_| context.pss.share_n(&secrets, context.gf.as_ref(), &mut rng)[id as usize])
+                .collect();
+            let mut iter = small_pool.into_iter().cycle();
+            move || iter.next().unwrap()
+        };
+        let mut bit_gen = {
+            let small_pool: Vec<_> = (0..100)
+                .map(|_| {
+                    let secrets: Vec<_> = (0..context.l)
+                        .map(|_| {
+                            if rng.gen::<bool>() {
+                                context.gf.one()
+                            } else {
+                                context.gf.zero()
+                            }
+                        })
+                        .collect();
+                    context.pss.share(&secrets, context.gf.as_ref(), &mut rng)[id as usize]
+                })
+                .collect();
+            let mut iter = small_pool.into_iter().cycle();
+            move || iter.next().unwrap()
+        };
 
-        let masks = (0..num_blocks)
-            .map(|_| {
-                let secrets: Vec<_> = (0..context.l)
-                    .map(|_| {
-                        if rng.gen::<bool>() {
-                            context.gf.one()
-                        } else {
-                            context.gf.zero()
-                        }
-                    })
-                    .collect();
-                context.pss.share(&secrets, context.gf.as_ref(), &mut rng)[id as usize]
-            })
-            .collect();
-
+        let masks = (0..num_blocks).map(|_| bit_gen()).collect();
         let keys = [(); 2].map(|_| {
             (0..context.lpn_key_len)
-                .map(|_| {
-                    (0..num_blocks)
-                        .map(|_| context.pss.rand(context.gf.as_ref(), &mut rng)[id as usize])
-                        .collect()
-                })
+                .map(|_| (0..num_blocks).map(|_| rand_gen()).collect())
                 .collect()
         });
 
@@ -272,23 +287,9 @@ impl PreProc {
             + num_xor * 4 * context.lpn_mssg_len
             + num_inv * 2 * context.lpn_mssg_len;
 
-        let randoms = (0..num_rand)
-            .map(|_| context.pss.rand(context.gf.as_ref(), &mut rng)[id as usize])
-            .collect();
-        let zeros = {
-            let secrets = vec![context.gf.zero(); context.l];
-            (0..num_zeros)
-                .map(|_| context.pss.share(&secrets, context.gf.as_ref(), &mut rng)[id as usize])
-                .collect()
-        };
-        let errors = {
-            // Errors are set to 0 to make writing tests easier (can avoid error correction when
-            // decrypting).
-            let secrets = vec![context.gf.zero(); context.l];
-            (0..num_errors)
-                .map(|_| context.pss.share(&secrets, context.gf.as_ref(), &mut rng)[id as usize])
-                .collect()
-        };
+        let randoms = (0..num_rand).map(|_| rand_gen()).collect();
+        let zeros = (0..num_zeros).map(|_| zero_n_gen()).collect();
+        let errors = (0..num_errors).map(|_| bit_gen()).collect();
 
         Self {
             masks,
