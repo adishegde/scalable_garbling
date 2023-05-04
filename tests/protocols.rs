@@ -131,8 +131,6 @@ async fn randbit() {
     path.push("tests/data/n16_t5.txt");
     let bin_supinv_matrix = Arc::new(math::binary_super_inv_matrix(&path, &gf));
 
-    let pos = vec![gf.get(101), gf.get(102), gf.get(103)];
-
     let mut handles = Vec::new();
     for context in contexts {
         let context = preproc::RandBitContext::new(bin_supinv_matrix.clone(), &context);
@@ -151,9 +149,8 @@ async fn randbit() {
         }
     }
 
-    let recon_coeffs = pss.recon_coeffs_n(&pos, &gf);
     for sharing in sharings {
-        let secrets = math::utils::matrix_vector_prod(&recon_coeffs, &sharing, &gf);
+        let secrets = pss.semihon_recon(&sharing, gf.as_ref());
         for secret in secrets {
             assert!((secret == gf.one()) || (secret == gf.zero()));
         }
