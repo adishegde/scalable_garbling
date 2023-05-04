@@ -342,7 +342,10 @@ async fn connect_to_peers(party_id: PartyID, addresses: &[String]) -> Vec<Option
     let my_address = addresses[usize::from(party_id)].clone();
 
     let accept_incoming = spawn(async move {
-        let listener = TcpListener::bind(my_address).await.unwrap();
+        let (_, port) = my_address.split_once(':').unwrap();
+        let mut listen_addr = String::from("0.0.0.0:");
+        listen_addr.push_str(port);
+        let listener = TcpListener::bind(listen_addr).await.unwrap();
 
         let mut streams: Vec<_> = (0..num_parties).map(|_| None).collect();
 
