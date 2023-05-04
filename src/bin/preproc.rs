@@ -1,7 +1,7 @@
 use argh::FromArgs;
 use json;
 use scalable_mpc::circuit::{Circuit, PackedCircuit};
-use scalable_mpc::protocol::{garble, network, preproc, MPCContext};
+use scalable_mpc::protocol::{network, preproc, MPCContext};
 use scalable_mpc::{math, sharing, PartyID};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -41,7 +41,7 @@ impl Stats {
 
 /// Benchmark garbling phase.
 #[derive(FromArgs)]
-struct Garble {
+struct PreProc {
     /// id of the party
     #[argh(option)]
     id: PartyID,
@@ -65,6 +65,10 @@ struct Garble {
     /// packing parameter
     #[argh(option)]
     packing_param: u32,
+
+    /// file containing binary super invertible matrix
+    #[argh(option)]
+    binsup_mat: String,
 
     /// base 2 log of LPN bernoulli error probability
     #[argh(option, default = "2")]
@@ -91,10 +95,14 @@ struct Garble {
     threads: usize,
 }
 
-async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
+async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: PreProc) {
     let n: u32 = ipaddrs.len().try_into().unwrap();
 
     println!("--- Party {} ---", opts.id);
+
+    let (stats, net) = network::setup_tcp_network(opts.id, &ipaddrs).await;
+    println!("Connected to network.");
+    std::io::stdout().flush().unwrap();
 
     let gf = Arc::new(math::galois::GF::new(opts.gf_width).unwrap());
     let pss = Arc::new(sharing::PackedSharing::new(
@@ -103,11 +111,16 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
         opts.packing_param,
         gf.as_ref(),
     ));
-
-    let (stats, net) = network::setup_tcp_network(opts.id, &ipaddrs).await;
-    println!("Connected to network.");
-
-    let mpcctx = MPCContext {
+    let bin_supinv_matrix = {
+        let path = PathBuf::from(opts.binsup_mat);
+        Arc::new(math::binary_super_inv_matrix(&path, gf.as_ref()))
+    };
+    let supinv_matrix = Arc::new(math::super_inv_matrix(
+        n as usize,
+        (n - opts.threshold) as usize,
+        gf.as_ref(),
+    ));
+    let context = MPCContext {
         id: opts.id,
         n: n as usize,
         t: opts.threshold as usize,
@@ -119,37 +132,39 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
         pss,
         net_builder: net.clone(),
     };
+    let rcontext = preproc::RandContext::new(supinv_matrix.clone(), &context);
+    let zcontext = preproc::ZeroContext::new(supinv_matrix, &context);
+    let bcontext = preproc::RandBitContext::new(bin_supinv_matrix, &context);
 
-    let preproc = preproc::PreProc::dummy(opts.id, 200, &circ, &mpcctx);
-    println!("Computed dummy preprocessing.");
-    std::io::stdout().flush().unwrap();
-
-    let mut bench_data = json::JsonValue::new_object();
-
-    let context = {
-        let start = Instant::now();
-        let context = garble::GarbleContextData::new(circ, mpcctx);
-        let comp_time: u64 = start.elapsed().as_millis().try_into().unwrap();
-        bench_data["onetime_comp"] = comp_time.into();
-        Arc::new(context)
-    };
-    println!();
-    println!("Completed onetime circuit dependent computation.");
-    println!("Time: {} ms", bench_data["onetime_comp"]);
-    std::io::stdout().flush().unwrap();
+    let num_circ_inp_blocks = circ.inputs().len();
+    let (num_and, num_xor, num_inv) = circ.get_gate_counts();
 
     let bench_proto = b"benchmark communication protocol".to_vec();
     let mut chan = net.channel(bench_proto.clone());
-    bench_data["garbling"] = json::JsonValue::new_array();
+    let mut bench_data = json::JsonValue::new_array();
 
     for i in 0..opts.reps {
         network::sync(bench_proto.clone(), &mut chan, n as usize).await;
-        let preproc = preproc.clone();
         let context = context.clone();
+        let rcontext = rcontext.clone();
+        let zcontext = zcontext.clone();
+        let bcontext = bcontext.clone();
+
         let gproto_id = b"".to_vec();
 
         let start = Stats::now(&stats, n).await;
-        garble::garble(gproto_id, preproc, context).await;
+        preproc::preproc(
+            gproto_id,
+            num_circ_inp_blocks,
+            num_and,
+            num_xor,
+            num_inv,
+            context,
+            rcontext,
+            zcontext,
+            bcontext,
+        )
+        .await;
         let (runtime, comm) = start.elapsed(&stats).await;
 
         println!();
@@ -161,7 +176,7 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
         );
         std::io::stdout().flush().unwrap();
 
-        bench_data["garbling"]
+        bench_data
             .push(json::object! {
                 time: runtime,
                 comm: comm.into_iter().map(|(x, y)| json::array![x, y]).collect::<Vec<_>>()
@@ -219,7 +234,7 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
 }
 
 fn main() {
-    let opts: Garble = argh::from_env();
+    let opts: PreProc = argh::from_env();
 
     let ipaddrs: Vec<_> = {
         let path = PathBuf::from(opts.net.clone());
