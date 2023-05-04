@@ -1,14 +1,16 @@
 use super::core;
 use super::network;
 use super::network::{NetworkChannelBuilder, Recipient, SendMessage};
-use super::{MPCContext, ProtocolID};
+use super::{MPCContext, ProtocolID, ProtocolIDBuilder};
 use crate::circuit::{PackedCircuit, PackedGate};
 use crate::math::galois::{GFMatrix, GF};
 use crate::math::utils;
 use crate::sharing::{PackedShare, PackedSharing};
 use crate::PartyID;
+use futures_lite::stream::StreamExt;
 use rand::{thread_rng, Rng, SeedableRng};
 use std::sync::Arc;
+use tokio::spawn;
 
 #[derive(Clone)]
 pub struct RandContext {
@@ -136,13 +138,9 @@ impl RandBitContext {
     }
 }
 
-pub async fn randbit(
-    id: ProtocolID,
-    share_coeffs: Arc<GFMatrix>,
-    context: RandBitContext,
-) -> Vec<PackedShare> {
+pub async fn randbit(id: ProtocolID, context: RandBitContext) -> Vec<PackedShare> {
     let mut chan = context.net_builder.channel(id.clone());
-    let shares: Vec<_> = {
+    let shares = {
         let mut rng = thread_rng();
         let secrets: Vec<_> = (0..context.l)
             .map(|_| {
@@ -153,12 +151,7 @@ pub async fn randbit(
                 }
             })
             .collect();
-        context.pss.share_using_coeffs(
-            secrets,
-            share_coeffs.as_ref(),
-            context.gf.as_ref(),
-            &mut rng,
-        )
+        context.pss.share(&secrets, context.gf.as_ref(), &mut rng)
     };
 
     for (i, share) in shares.into_iter().enumerate() {
@@ -298,5 +291,153 @@ impl PreProc {
             zeros,
             errors,
         }
+    }
+}
+
+pub async fn preproc(
+    id: ProtocolID,
+    num_circ_inp_blocks: usize,
+    num_and_blocks: usize,
+    num_xor_blocks: usize,
+    num_inv_blocks: usize,
+    context: MPCContext,
+    rcontext: RandContext,
+    zcontext: ZeroContext,
+    bcontext: RandBitContext,
+) -> PreProc {
+    assert_eq!(context.lpn_tau, 2);
+
+    let num_batches = |num: usize, batch_size: usize| (num + batch_size - 1) / batch_size;
+
+    let num_gate_block = num_and_blocks + num_xor_blocks + num_inv_blocks;
+    let num_blocks = num_circ_inp_blocks + num_gate_block;
+    let num_inp_blocks = num_and_blocks * 2 + num_xor_blocks * 2 + num_inv_blocks;
+
+    let num_trans_per_wire = 2 * context.lpn_key_len + 1;
+    let num_rtrans = (num_batches(num_blocks, context.l) + num_batches(num_inp_blocks, context.l))
+        * num_trans_per_wire;
+    let num_mult = num_and_blocks * (4 * context.lpn_mssg_len + 1)
+        + num_xor_blocks * 4 * context.lpn_mssg_len
+        + num_inv_blocks * 2 * context.lpn_mssg_len;
+
+    let num_masks = num_blocks;
+    let num_keys = num_blocks * 2 * context.lpn_key_len;
+    let num_rand_preproc = num_rtrans * (context.n + context.t) + num_mult;
+    let num_zeros_preproc = num_rtrans * 2 * context.n + num_mult;
+
+    let num_errors = num_and_blocks * 4 * context.lpn_mssg_len
+        + num_xor_blocks * 4 * context.lpn_mssg_len
+        + num_inv_blocks * 2 * context.lpn_mssg_len;
+
+    let num_rand_batches = num_batches(
+        num_keys + num_rand_preproc + num_errors,
+        context.n - context.t,
+    );
+    let num_zero_batches = num_batches(num_zeros_preproc + num_errors, context.n - context.t);
+    let num_rbit_batches = num_batches(num_masks + 2 * num_errors, bcontext.bin_super_inv.len());
+
+    let num_subproto = num_rand_batches + num_zero_batches + num_rbit_batches + 2;
+    let mut id_gen = ProtocolIDBuilder::new(&id, num_subproto as u64);
+
+    // Compute base preproc material.
+    let mut rbit_shares = {
+        let mut handles = Vec::with_capacity(num_rbit_batches);
+        for _ in 0..num_rbit_batches {
+            let sub_id = id_gen.next().unwrap();
+            handles.push(spawn(randbit(sub_id, bcontext.clone())));
+        }
+
+        futures_lite::stream::iter(handles)
+            .then(|fut| async { fut.await.unwrap() })
+            .map(|shares| futures_lite::stream::iter(shares))
+            .flatten()
+            .boxed()
+    };
+
+    let mut rand_shares = {
+        let mut handles = Vec::with_capacity(num_rand_batches);
+        for _ in 0..num_rand_batches {
+            let sub_id = id_gen.next().unwrap();
+            handles.push(spawn(rand(sub_id, rcontext.clone())));
+        }
+
+        futures_lite::stream::iter(handles)
+            .then(|fut| async { fut.await.unwrap() })
+            .map(|shares| futures_lite::stream::iter(shares))
+            .flatten()
+            .boxed()
+    };
+
+    let mut zero_shares = {
+        let mut handles = Vec::with_capacity(num_zero_batches);
+        for _ in 0..num_zero_batches {
+            let sub_id = id_gen.next().unwrap();
+            handles.push(spawn(zero(sub_id, zcontext.clone())));
+        }
+
+        futures_lite::stream::iter(handles)
+            .then(|fut| async { fut.await.unwrap() })
+            .map(|shares| futures_lite::stream::iter(shares))
+            .flatten()
+            .boxed()
+    };
+
+    let errors = {
+        let mut x = Vec::with_capacity(2 * num_errors);
+        for _ in 0..(2 * num_errors) {
+            x.push(rbit_shares.next().await.unwrap());
+        }
+        let y = x.split_off(num_errors);
+
+        let mut randoms = Vec::with_capacity(num_errors);
+        for _ in 0..num_errors {
+            randoms.push(rand_shares.next().await.unwrap());
+        }
+
+        let mut zeros = Vec::with_capacity(num_errors);
+        for _ in 0..num_errors {
+            zeros.push(zero_shares.next().await.unwrap());
+        }
+
+        let sub_id = id_gen.next().unwrap();
+        core::batch_mult(sub_id, x, y, randoms, zeros, context.clone()).await
+    };
+
+    let masks = {
+        let mut res = Vec::with_capacity(num_masks);
+        for _ in 0..num_masks {
+            res.push(rbit_shares.next().await.unwrap());
+        }
+
+        res
+    };
+
+    let keys = {
+        let mut keys = [
+            Vec::with_capacity(context.lpn_key_len),
+            Vec::with_capacity(context.lpn_key_len),
+        ];
+
+        for i in 0..2 {
+            for _ in 0..context.lpn_key_len {
+                let mut key = Vec::with_capacity(num_blocks);
+
+                for _ in 0..num_blocks {
+                    key.push(rand_shares.next().await.unwrap());
+                }
+
+                keys[i].push(key);
+            }
+        }
+
+        keys
+    };
+
+    PreProc {
+        masks,
+        keys,
+        randoms: rand_shares.collect().await,
+        zeros: zero_shares.collect().await,
+        errors,
     }
 }

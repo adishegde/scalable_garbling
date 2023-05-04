@@ -15,7 +15,7 @@ const GF_WIDTH: u8 = 18;
 const N: usize = 16;
 const T: usize = 5;
 const L: usize = 3;
-const LPN_TAU: usize = 4;
+const LPN_TAU: usize = 2;
 const LPN_KEY_LEN: usize = 5;
 const LPN_MSSG_LEN: usize = 7;
 
@@ -132,16 +132,11 @@ async fn randbit() {
     let bin_supinv_matrix = Arc::new(math::binary_super_inv_matrix(&path, &gf));
 
     let pos = vec![gf.get(101), gf.get(102), gf.get(103)];
-    let share_coeffs = Arc::new(pss.share_coeffs(&pos, &gf));
 
     let mut handles = Vec::new();
     for context in contexts {
         let context = preproc::RandBitContext::new(bin_supinv_matrix.clone(), &context);
-        handles.push(spawn(preproc::randbit(
-            proto_id.clone(),
-            share_coeffs.clone(),
-            context,
-        )));
+        handles.push(spawn(preproc::randbit(proto_id.clone(), context)));
     }
 
     let mut sharings = vec![Vec::with_capacity(N); bin_supinv_matrix.len()];
@@ -560,5 +555,72 @@ async fn garble() {
                 }
             }
         }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn preproc() {
+    let circ = {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("tests/data/sub64.txt");
+        let circ = Circuit::from_bristol_fashion(&path);
+        circ.pack(L as u32)
+    };
+
+    let (gf, _, contexts) = setup().await;
+
+    let bin_supinv_matrix = {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("tests/data/n16_t5.txt");
+        Arc::new(math::binary_super_inv_matrix(&path, gf.as_ref()))
+    };
+
+    let super_inv_matrix = Arc::new(math::super_inv_matrix(N, N - T, gf.as_ref()));
+
+    let (num_and, num_xor, num_inv) = circ.get_gate_counts();
+
+    let dummy_preproc = preproc::PreProc::dummy(0, 0, &circ, &contexts[0]);
+
+    let mut handles = Vec::new();
+    for context in contexts {
+        let rcontext = preproc::RandContext::new(super_inv_matrix.clone(), &context);
+        let zcontext = preproc::ZeroContext::new(super_inv_matrix.clone(), &context);
+        let bcontext = preproc::RandBitContext::new(bin_supinv_matrix.clone(), &context);
+        let circ = circ.clone();
+
+        handles.push(spawn(async move {
+            preproc::preproc(
+                b"".to_vec(),
+                circ.inputs().len(),
+                num_and,
+                num_xor,
+                num_inv,
+                context,
+                rcontext,
+                zcontext,
+                bcontext,
+            )
+            .await
+        }))
+    }
+
+    for handle in handles {
+        let preproc = handle.await.unwrap();
+
+        assert_eq!(preproc.masks.len(), dummy_preproc.masks.len());
+
+        assert_eq!(preproc.keys.len(), dummy_preproc.keys.len());
+        assert_eq!(preproc.keys[0].len(), dummy_preproc.keys[0].len());
+        assert_eq!(preproc.keys[1].len(), dummy_preproc.keys[1].len());
+        for i in 0..(preproc.keys[0].len()) {
+            assert_eq!(preproc.keys[0][i].len(), dummy_preproc.keys[0][i].len());
+            assert_eq!(preproc.keys[1][i].len(), dummy_preproc.keys[1][i].len());
+        }
+
+        assert_eq!(preproc.errors.len(), dummy_preproc.errors.len());
+
+        assert!(preproc.randoms.len() >= dummy_preproc.randoms.len());
+        assert!(preproc.zeros.len() >= dummy_preproc.zeros.len());
     }
 }

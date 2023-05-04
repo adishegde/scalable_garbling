@@ -271,4 +271,20 @@ impl PackedCircuit {
     pub fn gates_per_block(&self) -> u32 {
         self.gates_per_block
     }
+
+    pub fn get_gate_counts(&self) -> (usize, usize, usize) {
+        let mut num_and = 0;
+        let mut num_xor = 0;
+        let mut num_inv = 0;
+
+        for gate in &self.gates {
+            match gate {
+                PackedGate::And(_) => num_and = num_and + 1,
+                PackedGate::Xor(_) => num_xor = num_xor + 1,
+                PackedGate::Inv(_) => num_inv = num_inv + 1,
+            }
+        }
+
+        (num_and, num_xor, num_inv)
+    }
 }
