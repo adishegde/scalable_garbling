@@ -336,77 +336,12 @@ pub async fn preproc(
     let num_zero_batches = num_batches(num_zeros_preproc + num_errors, context.n - context.t);
     let num_rbit_batches = num_batches(num_masks + 2 * num_errors, bcontext.bin_super_inv.len());
 
-    let num_subproto = num_rand_batches + num_zero_batches + num_rbit_batches + num_errors + 1;
+    let num_subproto = num_rand_batches + num_zero_batches + num_rbit_batches + num_errors + 10;
     let mut id_gen = ProtocolIDBuilder::new(&id, num_subproto as u64);
 
-    let mut rbit_shares = {
-        let mut res = Vec::with_capacity(num_rbit_batches * bcontext.bin_super_inv.len());
-        let mut ctr = 0;
-
-        while ctr < num_rbit_batches {
-            let num_instances = std::cmp::min(proto_batch, num_rbit_batches - ctr);
-            let mut handles = Vec::with_capacity(num_instances);
-
-            for _ in 0..num_instances {
-                let sub_id = id_gen.next().unwrap();
-                handles.push(spawn(randbit(sub_id, bcontext.clone())));
-            }
-
-            for handle in handles {
-                res.extend_from_slice(&handle.await.unwrap());
-            }
-
-            ctr += proto_batch;
-        }
-
-        res
-    };
-
-    let mut rand_shares = {
-        let mut res = Vec::with_capacity(num_rand_batches * (context.n - context.t));
-        let mut ctr = 0;
-
-        while ctr < num_rand_batches {
-            let num_instances = std::cmp::min(proto_batch, num_rand_batches - ctr);
-            let mut handles = Vec::with_capacity(num_instances);
-
-            for _ in 0..num_instances {
-                let sub_id = id_gen.next().unwrap();
-                handles.push(spawn(rand(sub_id, rcontext.clone())));
-            }
-
-            for handle in handles {
-                res.extend_from_slice(&handle.await.unwrap());
-            }
-
-            ctr += proto_batch;
-        }
-
-        res
-    };
-
-    let mut zero_shares = {
-        let mut res = Vec::with_capacity(num_zero_batches * (context.n - context.t));
-        let mut ctr = 0;
-
-        while ctr < num_zero_batches {
-            let num_instances = std::cmp::min(proto_batch, num_zero_batches - ctr);
-            let mut handles = Vec::with_capacity(num_instances);
-
-            for _ in 0..num_instances {
-                let sub_id = id_gen.next().unwrap();
-                handles.push(spawn(zero(sub_id, zcontext.clone())));
-            }
-
-            for handle in handles {
-                res.extend_from_slice(&handle.await.unwrap());
-            }
-
-            ctr += proto_batch;
-        }
-
-        res
-    };
+    let mut randoms = Vec::with_capacity(num_rand_preproc);
+    let mut zeros = Vec::with_capacity(num_zeros_preproc);
+    let mut bits = Vec::with_capacity(num_masks);
 
     let errors = {
         let mut res = Vec::with_capacity(num_errors);
@@ -414,13 +349,56 @@ pub async fn preproc(
 
         while ctr < num_errors {
             let num_instances = std::cmp::min(proto_batch, num_errors - ctr);
-            let mut handles = Vec::with_capacity(num_instances);
+            let err_rand = num_batches(
+                std::cmp::max(num_instances, randoms.len()) - randoms.len(),
+                context.n - context.t,
+            );
+            let err_zero = num_batches(
+                std::cmp::max(num_instances, zeros.len()) - zeros.len(),
+                context.n - context.t,
+            );
+            let err_bits = num_batches(
+                std::cmp::max(2 * num_instances, bits.len()) - bits.len(),
+                bcontext.bin_super_inv.len(),
+            );
 
-            for _ in 0..std::cmp::min(proto_batch, num_errors - ctr) {
-                let x = rbit_shares.pop().unwrap();
-                let y = rbit_shares.pop().unwrap();
-                let r = rand_shares.pop().unwrap();
-                let z = zero_shares.pop().unwrap();
+            let mut rhandles = Vec::with_capacity(err_rand);
+            let mut zhandles = Vec::with_capacity(err_zero);
+            let mut bhandles = Vec::with_capacity(err_bits);
+
+            for _ in 0..err_rand {
+                let sub_id = id_gen.next().unwrap();
+                rhandles.push(spawn(rand(sub_id, rcontext.clone())));
+            }
+
+            for _ in 0..err_zero {
+                let sub_id = id_gen.next().unwrap();
+                zhandles.push(spawn(zero(sub_id, zcontext.clone())));
+            }
+
+            for _ in 0..err_bits {
+                let sub_id = id_gen.next().unwrap();
+                bhandles.push(spawn(randbit(sub_id, bcontext.clone())));
+            }
+
+            for handle in rhandles {
+                randoms.extend_from_slice(&handle.await.unwrap());
+            }
+
+            for handle in zhandles {
+                zeros.extend_from_slice(&handle.await.unwrap());
+            }
+
+            for handle in bhandles {
+                bits.extend_from_slice(&handle.await.unwrap());
+            }
+
+            let mut handles = Vec::with_capacity(num_instances);
+            for _ in 0..num_instances {
+                let x = bits.pop().unwrap();
+                let y = bits.pop().unwrap();
+                let r = randoms.pop().unwrap();
+                let z = zeros.pop().unwrap();
                 let sub_id = id_gen.next().unwrap();
                 handles.push(spawn(core::mult(sub_id, x, y, r, z, context.clone())));
             }
@@ -435,7 +413,77 @@ pub async fn preproc(
         res
     };
 
-    let masks = rbit_shares.split_off(rbit_shares.len() - num_masks);
+    {
+        let mut ctr = 0;
+        let batches = num_batches(
+            std::cmp::max(num_masks, bits.len()) - bits.len(),
+            bcontext.bin_super_inv.len(),
+        );
+
+        while ctr < batches {
+            let num_instances = std::cmp::min(proto_batch, batches - ctr);
+            let mut handles = Vec::with_capacity(num_instances);
+
+            for _ in 0..num_instances {
+                let sub_id = id_gen.next().unwrap();
+                handles.push(spawn(randbit(sub_id, bcontext.clone())));
+            }
+
+            for handle in handles {
+                bits.extend_from_slice(&handle.await.unwrap());
+            }
+
+            ctr += proto_batch;
+        }
+    }
+
+    {
+        let mut ctr = 0;
+        let batches = num_batches(
+            std::cmp::max(num_keys + num_rand_preproc, randoms.len()) - randoms.len(),
+            context.n - context.t,
+        );
+
+        while ctr < batches {
+            let num_instances = std::cmp::min(proto_batch, batches - ctr);
+            let mut handles = Vec::with_capacity(num_instances);
+
+            for _ in 0..num_instances {
+                let sub_id = id_gen.next().unwrap();
+                handles.push(spawn(rand(sub_id, rcontext.clone())));
+            }
+
+            for handle in handles {
+                randoms.extend_from_slice(&handle.await.unwrap());
+            }
+
+            ctr += proto_batch;
+        }
+    }
+
+    {
+        let mut ctr = 0;
+        let batches = num_batches(
+            std::cmp::max(num_zeros_preproc, zeros.len()) - zeros.len(),
+            context.n - context.t,
+        );
+
+        while ctr < batches {
+            let num_instances = std::cmp::min(proto_batch, batches - ctr);
+            let mut handles = Vec::with_capacity(num_instances);
+
+            for _ in 0..num_instances {
+                let sub_id = id_gen.next().unwrap();
+                handles.push(spawn(zero(sub_id, zcontext.clone())));
+            }
+
+            for handle in handles {
+                zeros.extend_from_slice(&handle.await.unwrap());
+            }
+
+            ctr += proto_batch;
+        }
+    }
 
     let keys = {
         let mut keys = [
@@ -448,7 +496,7 @@ pub async fn preproc(
                 let mut key = Vec::with_capacity(num_blocks);
 
                 for _ in 0..num_blocks {
-                    key.push(rand_shares.pop().unwrap());
+                    key.push(randoms.pop().unwrap());
                 }
 
                 keys[i].push(key);
@@ -458,11 +506,13 @@ pub async fn preproc(
         keys
     };
 
+    let masks = bits.split_off(bits.len() - num_masks);
+
     PreProc {
         masks,
         keys,
-        randoms: rand_shares,
-        zeros: zero_shares,
+        randoms,
+        zeros,
         errors,
     }
 }
