@@ -332,8 +332,8 @@ pub async fn message_from_each_party(
 
 // Establish TCP connection with every peer.
 async fn connect_to_peers(party_id: PartyID, addresses: &[String]) -> Vec<Option<TcpStream>> {
-    const NUM_RETRIES: usize = 10;
-    const SEC_BETWEEN_RETRIES: u64 = 1;
+    const NUM_RETRIES: usize = 1000;
+    const SEC_BETWEEN_RETRIES: u64 = 2;
 
     let num_parties: PartyID = addresses
         .len()
