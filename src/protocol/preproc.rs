@@ -7,7 +7,6 @@ use crate::math::galois::{GFMatrix, GF};
 use crate::math::utils;
 use crate::sharing::{PackedShare, PackedSharing};
 use crate::PartyID;
-use futures_lite::stream::StreamExt;
 use rand::{thread_rng, Rng, SeedableRng};
 use std::sync::Arc;
 use tokio::spawn;
@@ -395,7 +394,13 @@ pub async fn preproc(
 
             handles.push(spawn(core::mult(sub_id, x, y, r, z, context.clone())));
         }
-        futures_lite::stream::iter(handles).then(|fut| async { fut.await.unwrap() })
+
+        let mut res = Vec::with_capacity(num_errors);
+        for handle in handles {
+            res.push(handle.await.unwrap());
+        }
+
+        res
     };
 
     let masks = rbit_shares.split_off(rbit_shares.len() - num_masks);
@@ -426,6 +431,6 @@ pub async fn preproc(
         keys,
         randoms: rand_shares,
         zeros: zero_shares,
-        errors: errors.collect().await,
+        errors,
     }
 }
