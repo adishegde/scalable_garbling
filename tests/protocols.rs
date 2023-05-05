@@ -589,6 +589,7 @@ async fn preproc() {
         handles.push(spawn(async move {
             preproc::preproc(
                 b"".to_vec(),
+                10,
                 circ.inputs().len(),
                 num_and,
                 num_xor,
@@ -617,7 +618,7 @@ async fn preproc() {
 
         assert_eq!(preproc.errors.len(), dummy_preproc.errors.len());
 
-        assert!(preproc.randoms.len() >= dummy_preproc.randoms.len());
-        assert!(preproc.zeros.len() >= dummy_preproc.zeros.len());
+        assert!(preproc.randoms.len() <= dummy_preproc.randoms.len() + N - T);
+        assert!(preproc.zeros.len() <= dummy_preproc.zeros.len() + N - T);
     }
 }

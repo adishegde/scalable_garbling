@@ -295,6 +295,7 @@ impl PreProc {
 
 pub async fn preproc(
     id: ProtocolID,
+    proto_batch: usize,
     num_circ_inp_blocks: usize,
     num_and_blocks: usize,
     num_xor_blocks: usize,
@@ -339,65 +340,96 @@ pub async fn preproc(
     let mut id_gen = ProtocolIDBuilder::new(&id, num_subproto as u64);
 
     let mut rbit_shares = {
-        let mut handles = Vec::with_capacity(num_rbit_batches);
-        for _ in 0..num_rbit_batches {
-            let sub_id = id_gen.next().unwrap();
-            handles.push(spawn(randbit(sub_id, bcontext.clone())));
-        }
-
         let mut res = Vec::with_capacity(num_rbit_batches * bcontext.bin_super_inv.len());
-        for handle in handles {
-            res.extend_from_slice(&handle.await.unwrap());
+        let mut ctr = 0;
+
+        while ctr < num_rbit_batches {
+            let num_instances = std::cmp::min(proto_batch, num_rbit_batches - ctr);
+            let mut handles = Vec::with_capacity(num_instances);
+
+            for _ in 0..num_instances {
+                let sub_id = id_gen.next().unwrap();
+                handles.push(spawn(randbit(sub_id, bcontext.clone())));
+            }
+
+            for handle in handles {
+                res.extend_from_slice(&handle.await.unwrap());
+            }
+
+            ctr += proto_batch;
         }
 
         res
     };
 
     let mut rand_shares = {
-        let mut handles = Vec::with_capacity(num_rand_batches);
-        for _ in 0..num_rand_batches {
-            let sub_id = id_gen.next().unwrap();
-            handles.push(spawn(rand(sub_id, rcontext.clone())));
-        }
-
         let mut res = Vec::with_capacity(num_rand_batches * (context.n - context.t));
-        for handle in handles {
-            res.extend_from_slice(&handle.await.unwrap());
+        let mut ctr = 0;
+
+        while ctr < num_rand_batches {
+            let num_instances = std::cmp::min(proto_batch, num_rand_batches - ctr);
+            let mut handles = Vec::with_capacity(num_instances);
+
+            for _ in 0..num_instances {
+                let sub_id = id_gen.next().unwrap();
+                handles.push(spawn(rand(sub_id, rcontext.clone())));
+            }
+
+            for handle in handles {
+                res.extend_from_slice(&handle.await.unwrap());
+            }
+
+            ctr += proto_batch;
         }
 
         res
     };
 
     let mut zero_shares = {
-        let mut handles = Vec::with_capacity(num_zero_batches);
-        for _ in 0..num_zero_batches {
-            let sub_id = id_gen.next().unwrap();
-            handles.push(spawn(zero(sub_id, zcontext.clone())));
-        }
-
         let mut res = Vec::with_capacity(num_zero_batches * (context.n - context.t));
-        for handle in handles {
-            res.extend_from_slice(&handle.await.unwrap());
+        let mut ctr = 0;
+
+        while ctr < num_zero_batches {
+            let num_instances = std::cmp::min(proto_batch, num_zero_batches - ctr);
+            let mut handles = Vec::with_capacity(num_instances);
+
+            for _ in 0..num_instances {
+                let sub_id = id_gen.next().unwrap();
+                handles.push(spawn(zero(sub_id, zcontext.clone())));
+            }
+
+            for handle in handles {
+                res.extend_from_slice(&handle.await.unwrap());
+            }
+
+            ctr += proto_batch;
         }
 
         res
     };
 
     let errors = {
-        let mut handles = Vec::new();
-        for _ in 0..num_errors {
-            let x = rbit_shares.pop().unwrap();
-            let y = rbit_shares.pop().unwrap();
-            let r = rand_shares.pop().unwrap();
-            let z = zero_shares.pop().unwrap();
-            let sub_id = id_gen.next().unwrap();
-
-            handles.push(spawn(core::mult(sub_id, x, y, r, z, context.clone())));
-        }
-
         let mut res = Vec::with_capacity(num_errors);
-        for handle in handles {
-            res.push(handle.await.unwrap());
+        let mut ctr = 0;
+
+        while ctr < num_errors {
+            let num_instances = std::cmp::min(proto_batch, num_errors - ctr);
+            let mut handles = Vec::with_capacity(num_instances);
+
+            for _ in 0..std::cmp::min(proto_batch, num_errors - ctr) {
+                let x = rbit_shares.pop().unwrap();
+                let y = rbit_shares.pop().unwrap();
+                let r = rand_shares.pop().unwrap();
+                let z = zero_shares.pop().unwrap();
+                let sub_id = id_gen.next().unwrap();
+                handles.push(spawn(core::mult(sub_id, x, y, r, z, context.clone())));
+            }
+
+            for handle in handles {
+                res.push(handle.await.unwrap());
+            }
+
+            ctr += proto_batch;
         }
 
         res
