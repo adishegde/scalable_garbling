@@ -360,13 +360,22 @@ async fn connect_to_peers(party_id: PartyID, addresses: &[String]) -> Vec<Option
         while let Some(mut stream) = incoming.next().await {
             stream.set_nodelay(true).unwrap();
 
-            let mut id_bytes = [0; std::mem::size_of::<PartyID>()];
+            let mut id_bytes = [0; 9];
             stream
-                .read_exact(&mut id_bytes)
+                .read_exact(&mut id_bytes[..1])
                 .await
                 .expect("TCP stream is readable.");
 
-            let connector_id = PartyID::from_be_bytes(id_bytes);
+            let connector_id = {
+                let enc_len = vint64::decoded_len(id_bytes[0]);
+                if enc_len != 1 {
+                    stream
+                        .read_exact(&mut id_bytes[1..enc_len])
+                        .await
+                        .expect("TCP stream is readable.");
+                }
+                vint64::decode(&mut &id_bytes[..enc_len]).unwrap() as PartyID
+            };
             streams[usize::from(connector_id)] = Some(stream);
         }
 
@@ -397,7 +406,7 @@ async fn connect_to_peers(party_id: PartyID, addresses: &[String]) -> Vec<Option
 
             stream.set_nodelay(true).unwrap();
             stream
-                .write_all(&party_id.to_be_bytes())
+                .write_all(vint64::encode(party_id as u64).as_ref())
                 .await
                 .expect("TCP stream is writeable.");
             stream.flush().await.expect("TCP stream is flushble.");
