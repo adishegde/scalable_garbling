@@ -346,11 +346,12 @@ pub async fn preproc(
             handles.push(spawn(randbit(sub_id, bcontext.clone())));
         }
 
-        futures_lite::stream::iter(handles)
-            .then(|fut| async { fut.await.unwrap() })
-            .map(|shares| futures_lite::stream::iter(shares))
-            .flatten()
-            .boxed()
+        let mut res = Vec::with_capacity(num_rbit_batches * bcontext.bin_super_inv.len());
+        for handle in handles {
+            res.extend_from_slice(&handle.await.unwrap());
+        }
+
+        res
     };
 
     let mut rand_shares = {
@@ -360,11 +361,12 @@ pub async fn preproc(
             handles.push(spawn(rand(sub_id, rcontext.clone())));
         }
 
-        futures_lite::stream::iter(handles)
-            .then(|fut| async { fut.await.unwrap() })
-            .map(|shares| futures_lite::stream::iter(shares))
-            .flatten()
-            .boxed()
+        let mut res = Vec::with_capacity(num_rand_batches * (context.n - context.t));
+        for handle in handles {
+            res.extend_from_slice(&handle.await.unwrap());
+        }
+
+        res
     };
 
     let mut zero_shares = {
@@ -374,20 +376,21 @@ pub async fn preproc(
             handles.push(spawn(zero(sub_id, zcontext.clone())));
         }
 
-        futures_lite::stream::iter(handles)
-            .then(|fut| async { fut.await.unwrap() })
-            .map(|shares| futures_lite::stream::iter(shares))
-            .flatten()
-            .boxed()
+        let mut res = Vec::with_capacity(num_zero_batches * (context.n - context.t));
+        for handle in handles {
+            res.extend_from_slice(&handle.await.unwrap());
+        }
+
+        res
     };
 
     let errors = {
         let mut handles = Vec::new();
         for _ in 0..num_errors {
-            let x = rbit_shares.next().await.unwrap();
-            let y = rbit_shares.next().await.unwrap();
-            let r = rand_shares.next().await.unwrap();
-            let z = zero_shares.next().await.unwrap();
+            let x = rbit_shares.pop().unwrap();
+            let y = rbit_shares.pop().unwrap();
+            let r = rand_shares.pop().unwrap();
+            let z = zero_shares.pop().unwrap();
             let sub_id = id_gen.next().unwrap();
 
             handles.push(spawn(core::mult(sub_id, x, y, r, z, context.clone())));
@@ -395,14 +398,7 @@ pub async fn preproc(
         futures_lite::stream::iter(handles).then(|fut| async { fut.await.unwrap() })
     };
 
-    let masks = {
-        let mut res = Vec::with_capacity(num_masks);
-        for _ in 0..num_masks {
-            res.push(rbit_shares.next().await.unwrap());
-        }
-
-        res
-    };
+    let masks = rbit_shares.split_off(rbit_shares.len() - num_masks);
 
     let keys = {
         let mut keys = [
@@ -415,7 +411,7 @@ pub async fn preproc(
                 let mut key = Vec::with_capacity(num_blocks);
 
                 for _ in 0..num_blocks {
-                    key.push(rand_shares.next().await.unwrap());
+                    key.push(rand_shares.pop().unwrap());
                 }
 
                 keys[i].push(key);
@@ -428,8 +424,8 @@ pub async fn preproc(
     PreProc {
         masks,
         keys,
-        randoms: rand_shares.collect().await,
-        zeros: zero_shares.collect().await,
+        randoms: rand_shares,
+        zeros: zero_shares,
         errors: errors.collect().await,
     }
 }
