@@ -336,10 +336,9 @@ pub async fn preproc(
     let num_zero_batches = num_batches(num_zeros_preproc + num_errors, context.n - context.t);
     let num_rbit_batches = num_batches(num_masks + 2 * num_errors, bcontext.bin_super_inv.len());
 
-    let num_subproto = num_rand_batches + num_zero_batches + num_rbit_batches + 2;
+    let num_subproto = num_rand_batches + num_zero_batches + num_rbit_batches + num_errors + 1;
     let mut id_gen = ProtocolIDBuilder::new(&id, num_subproto as u64);
 
-    // Compute base preproc material.
     let mut rbit_shares = {
         let mut handles = Vec::with_capacity(num_rbit_batches);
         for _ in 0..num_rbit_batches {
