@@ -1,212 +1,299 @@
 mod bindings;
+use num_traits::identities::{One, Zero};
 use rand::distributions::{Distribution, Uniform};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
+use std::sync::{Once, OnceLock};
 
-/// Galois field with fixed order.
-pub struct GF {
-    width: u8,
-    num_bytes: usize,
-    rand_dist: Uniform<u32>,
-}
-
-impl GF {
-    /// Creates a Galois field of order `2^{width}`.
-    /// Width is required to be at most 30.
-    pub fn new(width: u8) -> Result<GF, &'static str> {
-        if width > 30 {
-            return Err("Width is too large.");
-        }
-
-        let ret = unsafe { bindings::galois_create_log_tables(width.into()) };
-        let num_bytes = (width as f64 / 8.0).ceil() as usize;
-
-        if ret != 0 {
-            Err("Could not create log tables.")
-        } else {
-            Ok(GF {
-                width,
-                num_bytes,
-                rand_dist: Uniform::new(0, 2_u32.pow(width.into())),
-            })
-        }
-    }
-
-    /// Creates field element with canonical representation `value`.
-    pub fn get(&self, value: u32) -> GFElement {
-        GFElement {
-            value,
-            width: self.width,
-        }
-    }
-
-    /// Transforms an iterator over values to iterator over corresponding field elements.
-    pub fn get_range<'a, I>(&'a self, iter: I) -> impl Iterator<Item = GFElement> + 'a
-    where
-        I: IntoIterator<Item = u32> + 'a,
-    {
-        iter.into_iter().map(|x| self.get(x))
-    }
-
-    /// Creates a random field element.
-    pub fn rand<R: Rng>(&self, rng: &mut R) -> GFElement {
-        GFElement {
-            value: self.rand_dist.sample(rng),
-            width: self.width,
-        }
-    }
-
-    /// Returns the multiplicative identity.
-    pub fn one(&self) -> GFElement {
-        self.get(1)
-    }
-
-    /// Returns the additive identity.
-    pub fn zero(&self) -> GFElement {
-        self.get(0)
-    }
-
-    /// Returns the order of the field.
-    pub fn order(&self) -> u32 {
-        2_u32.pow(self.width as u32)
-    }
-
-    /// Serialize a field element.
-    pub fn serialize_element(&self, element: &GFElement) -> Vec<u8> {
-        element.value.to_le_bytes()[..self.num_bytes].to_vec()
-    }
-
-    /// Deserialize a field element.
-    pub fn deserialize_element(&self, bytes: &[u8]) -> GFElement {
-        let mut le_bytes = [0, 0, 0, 0];
-        for i in 0..self.num_bytes {
-            le_bytes[i] = bytes[i];
-        }
-
-        GFElement {
-            value: u32::from_le_bytes(le_bytes),
-            width: self.width,
-        }
-    }
-
-    /// Serialize a slice of elements into bytes.
-    pub fn serialize_vec(&self, elements: &[GFElement]) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.num_bytes * elements.len());
-        for element in elements {
-            bytes.extend_from_slice(&element.value.to_le_bytes()[..self.num_bytes]);
-        }
-
-        bytes
-    }
-
-    /// Deserialize a slice of elements into bytes.
-    pub fn deserialize_vec(&self, bytes: &[u8]) -> Vec<GFElement> {
-        let num = bytes.len() / self.num_bytes;
-        let mut elements = Vec::with_capacity(num);
-
-        for le_chunk in bytes.chunks(self.num_bytes) {
-            let mut le_bytes = [0, 0, 0, 0];
-            for (i, &v) in le_chunk.iter().enumerate() {
-                le_bytes[i] = v;
-            }
-
-            elements.push(GFElement {
-                value: u32::from_le_bytes(le_bytes),
-                width: self.width,
-            });
-        }
-
-        elements
-    }
-}
-
-/// Represents a Galois field element.
+/// Galois field elements where the order of the field is 2^W.
 ///
-/// These are constructed using the respective galois field instances.
-/// The implemented operations assume that input field elements belong to the same field.
-/// The behaviour is undefined when inputs belong to different fields.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct GFElement {
-    value: u32,
-    width: u8,
-}
+/// Note that W is expected to be less than 30.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GF<const W: u8>(u32);
 
-impl AddAssign for GFElement {
-    #[allow(clippy::suspicious_op_assign_impl)]
-    fn add_assign(&mut self, rhs: Self) {
-        self.value ^= rhs.value;
+impl<const W: u8> GF<W> {
+    /// Order/size of the field.
+    pub const ORDER: u32 = 2_u32.pow(W as u32);
+
+    /// Number of bytes when serialized.
+    pub const NUM_BYTES: usize = ((W as usize) + 7) / 8;
+
+    /// Additive identity.
+    pub const ZERO: Self = Self(0);
+
+    /// Multiplicative identity.
+    pub const ONE: Self = Self(1);
+
+    fn get_dist() -> &'static Uniform<u32> {
+        static DIST: OnceLock<Uniform<u32>> = OnceLock::new();
+
+        DIST.get_or_init(|| Uniform::new(0, 2_u32.pow(W.into())))
+    }
+
+    /// Initialize the field by pre-computing data required to carry out field operations.
+    pub fn init() -> Result<(), &'static str> {
+        static INIT: Once = Once::new();
+
+        let mut flag = true;
+        INIT.call_once(|| {
+            let res = unsafe { bindings::galois_create_log_tables(W.into()) };
+            if res != 0 {
+                flag = false;
+            }
+        });
+
+        if flag {
+            Ok(())
+        } else {
+            Err("Could not initialize the field.")
+        }
+    }
+
+    /// Sample an element uniformly at random from the field.
+    pub fn rand<R: Rng>(rng: &mut R) -> Self {
+        Self(Self::get_dist().sample(rng))
     }
 }
 
-impl Add for GFElement {
-    type Output = Self;
+impl<const W: u8> From<u32> for GF<W> {
+    fn from(value: u32) -> Self {
+        let res = Self(value);
 
-    #[allow(clippy::suspicious_arithmetic_impl)]
-    fn add(self, other: Self) -> Self {
-        let mut sum = self;
-        sum += other;
-        sum
-    }
-}
-
-impl SubAssign for GFElement {
-    #[allow(clippy::suspicious_op_assign_impl)]
-    fn sub_assign(&mut self, rhs: Self) {
-        self.add_assign(rhs)
-    }
-}
-
-impl Sub for GFElement {
-    type Output = Self;
-
-    #[allow(clippy::suspicious_arithmetic_impl)]
-    fn sub(self, other: Self) -> Self {
-        let mut sum = self;
-        sum += other;
-        sum
-    }
-}
-
-impl MulAssign for GFElement {
-    fn mul_assign(&mut self, rhs: Self) {
-        self.value = unsafe {
-            bindings::galois_logtable_multiply(
-                self.value as i32,
-                rhs.value as i32,
-                self.width.into(),
-            ) as u32
+        if value >= Self::ORDER {
+            res * Self::ONE
+        } else {
+            res
         }
     }
 }
 
-impl Mul for GFElement {
+impl<const W: u8> From<GF<W>> for u32 {
+    fn from(value: GF<W>) -> u32 {
+        value.0
+    }
+}
+
+impl<const W: u8> MulAssign for GF<W> {
+    fn mul_assign(&mut self, rhs: Self) {
+        self.0 = unsafe {
+            bindings::galois_logtable_multiply(self.0 as i32, rhs.0 as i32, W.into()) as u32
+        }
+    }
+}
+
+impl<const W: u8> MulAssign<&GF<W>> for GF<W> {
+    fn mul_assign(&mut self, rhs: &Self) {
+        self.0 = unsafe {
+            bindings::galois_logtable_multiply(self.0 as i32, rhs.0 as i32, W.into()) as u32
+        }
+    }
+}
+
+impl<const W: u8> Mul for GF<W> {
     type Output = Self;
 
-    fn mul(self, other: Self) -> Self {
-        let mut prod = self;
+    fn mul(mut self, other: Self) -> Self {
+        self *= other;
+        self
+    }
+}
+
+impl<const W: u8> Mul<&GF<W>> for GF<W> {
+    type Output = Self;
+
+    fn mul(mut self, other: &Self) -> Self {
+        self *= other;
+        self
+    }
+}
+
+impl<const W: u8> Mul for &GF<W> {
+    type Output = GF<W>;
+
+    fn mul(self, other: Self) -> GF<W> {
+        let mut prod = GF(self.0);
         prod *= other;
         prod
     }
 }
 
-impl DivAssign for GFElement {
+impl<const W: u8> Mul<GF<W>> for &GF<W> {
+    type Output = GF<W>;
+
+    fn mul(self, mut other: GF<W>) -> GF<W> {
+        other *= self;
+        other
+    }
+}
+
+#[allow(clippy::suspicious_op_assign_impl)]
+impl<const W: u8> AddAssign for GF<W> {
+    fn add_assign(&mut self, rhs: Self) {
+        self.0 ^= rhs.0;
+    }
+}
+
+#[allow(clippy::suspicious_op_assign_impl)]
+impl<const W: u8> AddAssign<&GF<W>> for GF<W> {
+    fn add_assign(&mut self, rhs: &Self) {
+        self.0 ^= rhs.0;
+    }
+}
+
+impl<const W: u8> Add for GF<W> {
+    type Output = Self;
+
+    fn add(mut self, other: Self) -> Self {
+        self += other;
+        self
+    }
+}
+
+impl<const W: u8> Add<&GF<W>> for GF<W> {
+    type Output = Self;
+
+    fn add(mut self, other: &Self) -> Self {
+        self += other;
+        self
+    }
+}
+
+impl<const W: u8> Add for &GF<W> {
+    type Output = GF<W>;
+
+    fn add(self, other: Self) -> GF<W> {
+        let mut sum = GF(self.0);
+        sum += other;
+        sum
+    }
+}
+
+impl<const W: u8> Add<GF<W>> for &GF<W> {
+    type Output = GF<W>;
+
+    fn add(self, mut other: GF<W>) -> GF<W> {
+        other += self;
+        other
+    }
+}
+
+#[allow(clippy::suspicious_op_assign_impl)]
+impl<const W: u8> SubAssign for GF<W> {
+    fn sub_assign(&mut self, rhs: Self) {
+        *self += rhs;
+    }
+}
+
+#[allow(clippy::suspicious_op_assign_impl)]
+impl<const W: u8> SubAssign<&GF<W>> for GF<W> {
+    fn sub_assign(&mut self, rhs: &Self) {
+        *self += rhs;
+    }
+}
+
+#[allow(clippy::suspicious_arithmetic_impl)]
+impl<const W: u8> Sub for GF<W> {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        self + other
+    }
+}
+
+#[allow(clippy::suspicious_arithmetic_impl)]
+impl<const W: u8> Sub<&GF<W>> for GF<W> {
+    type Output = Self;
+
+    fn sub(self, other: &Self) -> Self {
+        self + other
+    }
+}
+
+#[allow(clippy::suspicious_arithmetic_impl)]
+impl<const W: u8> Sub for &GF<W> {
+    type Output = GF<W>;
+
+    fn sub(self, other: Self) -> GF<W> {
+        self + other
+    }
+}
+
+#[allow(clippy::suspicious_arithmetic_impl)]
+impl<const W: u8> Sub<GF<W>> for &GF<W> {
+    type Output = GF<W>;
+
+    fn sub(self, other: GF<W>) -> GF<W> {
+        self + other
+    }
+}
+
+impl<const W: u8> DivAssign for GF<W> {
     fn div_assign(&mut self, rhs: Self) {
-        self.value = unsafe {
-            bindings::galois_logtable_divide(self.value as i32, rhs.value as i32, self.width.into())
-                as u32
+        self.0 = unsafe {
+            bindings::galois_logtable_divide(self.0 as i32, rhs.0 as i32, W.into()) as u32
         };
     }
 }
 
-impl Div for GFElement {
+impl<const W: u8> DivAssign<&GF<W>> for GF<W> {
+    fn div_assign(&mut self, rhs: &Self) {
+        self.0 = unsafe {
+            bindings::galois_logtable_divide(self.0 as i32, rhs.0 as i32, W.into()) as u32
+        };
+    }
+}
+
+impl<const W: u8> Div for GF<W> {
     type Output = Self;
 
-    fn div(self, rhs: Self) -> Self {
-        let mut res = self;
+    fn div(mut self, rhs: Self) -> Self {
+        self /= rhs;
+        self
+    }
+}
+
+impl<const W: u8> Div<&GF<W>> for GF<W> {
+    type Output = Self;
+
+    fn div(mut self, rhs: &Self) -> Self {
+        self /= rhs;
+        self
+    }
+}
+
+impl<const W: u8> Div for &GF<W> {
+    type Output = GF<W>;
+
+    fn div(self, rhs: Self) -> GF<W> {
+        let mut res = GF(self.0);
         res /= rhs;
         res
     }
 }
 
-/// Matrix over a Galois field.
-pub type GFMatrix = Vec<Vec<GFElement>>;
+impl<const W: u8> Div<GF<W>> for &GF<W> {
+    type Output = GF<W>;
+
+    fn div(self, rhs: GF<W>) -> GF<W> {
+        let mut res = GF(self.0);
+        res /= rhs;
+        res
+    }
+}
+
+impl<const W: u8> Zero for GF<W> {
+    fn zero() -> Self {
+        Self::ZERO
+    }
+
+    fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl<const W: u8> One for GF<W> {
+    fn one() -> Self {
+        Self::ONE
+    }
+}

@@ -16,9 +16,7 @@ fn load_circuit_file() {
     let inp_a: u64 = 23948;
     let inp_b: u64 = 48;
 
-    let mut inputs = Vec::new();
-    inputs.push(int_to_bits(inp_a));
-    inputs.push(int_to_bits(inp_b));
+    let inputs = vec![int_to_bits(inp_a), int_to_bits(inp_b)];
 
     let circ = Circuit::from_bristol_fashion(&path);
     assert_eq!(circ.gates().len(), 439);

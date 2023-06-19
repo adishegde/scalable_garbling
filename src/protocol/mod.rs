@@ -1,11 +1,11 @@
-use crate::math::galois::GF;
 use crate::sharing::PackedSharing;
 use crate::PartyID;
+use std::fmt::Debug;
 use std::sync::Arc;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
 
 pub mod core;
-pub mod garble;
 pub mod network;
 pub mod preproc;
 
@@ -69,62 +69,33 @@ impl<'a> Iterator for ProtocolIDBuilder<'a> {
     }
 }
 
-pub struct ProtoChannel<S, R> {
-    sender: UnboundedSender<S>,
-    receiver: UnboundedReceiver<R>,
-}
-
-impl<S: std::fmt::Debug, R> ProtoChannel<S, R> {
-    pub fn send(&self, message: S) {
-        self.sender
-            .send(message)
-            .expect("Channel sender to be open.");
-    }
-
-    pub async fn recv(&mut self) -> R {
-        self.receiver
-            .recv()
-            .await
-            .expect("Channel receiver to be open.")
-    }
-}
-
 #[derive(Clone)]
-pub struct ProtoChannelBuilder {
-    worker_s: UnboundedSender<network::SendMessage>,
-    register_s: UnboundedSender<network::RegisterProtocol>,
+pub struct ProtoHandle<S: Debug, R: Debug> {
+    tx_send: UnboundedSender<S>,
+    tx_recv: UnboundedSender<(ProtocolID, oneshot::Sender<R>)>,
 }
 
-impl ProtoChannelBuilder {
-    fn new(
-        worker_s: UnboundedSender<network::SendMessage>,
-        register_s: UnboundedSender<network::RegisterProtocol>,
+impl<S: Debug, R: Debug> ProtoHandle<S, R> {
+    pub fn new(
+        tx_send: UnboundedSender<S>,
+        tx_recv: UnboundedSender<(ProtocolID, oneshot::Sender<R>)>,
     ) -> Self {
-        Self {
-            worker_s,
-            register_s,
-        }
+        Self { tx_send, tx_recv }
     }
 
-    pub fn channel(
-        &self,
-        id: ProtocolID,
-    ) -> ProtoChannel<network::SendMessage, network::ReceivedMessage> {
-        let (sender, receiver) = unbounded_channel();
+    pub async fn send(&self, mssg: S) {
+        self.tx_send.send(mssg).unwrap();
+    }
 
-        self.register_s
-            .send(network::RegisterProtocol(id, sender))
-            .unwrap();
-
-        ProtoChannel {
-            sender: self.worker_s.clone(),
-            receiver,
-        }
+    pub async fn recv(&self, id: ProtocolID) -> R {
+        let (tx, rx) = oneshot::channel();
+        self.tx_recv.send((id, tx)).unwrap();
+        rx.await.unwrap()
     }
 }
 
 #[derive(Clone)]
-pub struct MPCContext {
+pub struct MPCContext<const W: u8> {
     pub id: PartyID,         // ID of party
     pub n: usize,            // Number of parties
     pub t: usize,            // Threshold of corrupt parties
@@ -132,7 +103,6 @@ pub struct MPCContext {
     pub lpn_tau: usize,      // LPN error parameter; Bernoulli errors with bias 2^{-lnp_tau}
     pub lpn_key_len: usize,  // LPN key length
     pub lpn_mssg_len: usize, // LPN message/expanded length
-    pub gf: Arc<GF>,
-    pub pss: Arc<PackedSharing>,
-    pub net_builder: network::NetworkChannelBuilder,
+    pub pss: Arc<PackedSharing<W>>,
+    pub pss_n: Arc<PackedSharing<W>>,
 }

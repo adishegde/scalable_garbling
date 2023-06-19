@@ -1,45 +1,46 @@
-use rand::rngs::StdRng;
-use rand::SeedableRng;
+use ndarray::{s, Array2, Array3, ArrayView1, ArrayView2, Axis};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use scalable_mpc::circuit::Circuit;
 use scalable_mpc::math;
-use scalable_mpc::math::galois;
-use scalable_mpc::math::Combination;
-use scalable_mpc::protocol::{core, garble, network, preproc, MPCContext};
-use scalable_mpc::sharing;
-use serial_test::serial;
+use scalable_mpc::math::{galois::GF, Combination};
+use scalable_mpc::protocol::{core, network, preproc, MPCContext};
+use scalable_mpc::sharing::PackedSharing;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::task::spawn;
 
-const GF_WIDTH: u8 = 18;
+const W: u8 = 18;
 const N: usize = 16;
 const T: usize = 5;
 const L: usize = 3;
 const LPN_TAU: usize = 2;
 const LPN_KEY_LEN: usize = 5;
 const LPN_MSSG_LEN: usize = 7;
+const NUM: usize = 10;
 
 async fn setup() -> (
-    Arc<galois::GF>,
-    Arc<sharing::PackedSharing>,
-    Vec<MPCContext>,
+    Arc<PackedSharing<W>>,
+    Arc<PackedSharing<W>>,
+    Vec<(network::Network, MPCContext<W>)>,
 ) {
-    let gf = Arc::new(galois::GF::new(GF_WIDTH).unwrap());
-    let pss = Arc::new(sharing::PackedSharing::new(
-        N.try_into().unwrap(),
-        T.try_into().unwrap(),
-        L.try_into().unwrap(),
-        gf.as_ref(),
-    ));
-    let comms = network::setup_local_network(N as usize).await;
+    GF::<W>::init().unwrap();
 
-    let mut contexts = Vec::new();
+    let n: u32 = N.try_into().unwrap();
+    let t: u32 = T.try_into().unwrap();
+    let l: u32 = L.try_into().unwrap();
+
+    let defpos = PackedSharing::default_pos(n, l);
+    let pss = Arc::new(PackedSharing::new(t + l - 1, n, &defpos));
+    let pss_n = Arc::new(PackedSharing::new(n - 1, n, &defpos));
+    let comms = network::setup_local_network(n.try_into().unwrap()).await;
+
+    let mut res = Vec::with_capacity(N);
 
     for (pid, (_, net)) in comms.into_iter().enumerate() {
-        let gf = gf.clone();
         let pss = pss.clone();
+        let pss_n = pss_n.clone();
 
-        contexts.push(MPCContext {
+        let context = MPCContext {
             id: pid.try_into().unwrap(),
             n: N,
             t: T,
@@ -47,465 +48,237 @@ async fn setup() -> (
             lpn_tau: LPN_TAU,
             lpn_key_len: LPN_KEY_LEN,
             lpn_mssg_len: LPN_MSSG_LEN,
-            gf,
             pss,
-            net_builder: net,
-        });
+            pss_n,
+        };
+
+        res.push((net, context));
     }
 
-    (gf, pss, contexts)
+    (pss, pss_n, res)
+}
+
+fn rand_shares<R: Rng, const W: u8>(
+    num: usize,
+    pss: &PackedSharing<W>,
+    rng: &mut R,
+) -> Array2<GF<W>> {
+    let shares = (0..num).flat_map(|_| pss.rand(rng)).collect();
+    Array2::from_shape_vec((num, pss.num_parties() as usize), shares).unwrap()
+}
+
+fn shares<R: Rng, const W: u8>(
+    secrets: ArrayView2<GF<W>>,
+    pss: &PackedSharing<W>,
+    rng: &mut R,
+) -> Array2<GF<W>> {
+    assert_eq!(secrets.shape()[1], pss.num_secrets() as usize);
+
+    let shares = secrets
+        .axis_iter(Axis(0))
+        .flat_map(|row| pss.share(row, rng))
+        .collect();
+    Array2::from_shape_vec((secrets.shape()[0], pss.num_parties() as usize), shares).unwrap()
 }
 
 #[tokio::test]
-#[serial]
-async fn rand() {
-    let proto_id = b"protocol".to_vec();
-
-    let (gf, pss, contexts) = setup().await;
-    let super_inv_matrix = Arc::new(math::super_inv_matrix(N, N - T, gf.as_ref()));
-    let mut handles = Vec::new();
-
-    for context in contexts {
-        let context = preproc::RandContext::new(super_inv_matrix.clone(), &context);
-        handles.push(spawn(preproc::rand(proto_id.clone(), context)));
-    }
-
-    let mut sharings = vec![Vec::with_capacity(N); N - T];
-
-    for handle in handles {
-        let shares = handle.await.unwrap();
-
-        assert_eq!(shares.len(), N - T);
-
-        for (i, share) in shares.into_iter().enumerate() {
-            sharings[i].push(share);
-        }
-    }
-
-    for sharing in sharings {
-        pss.recon(&sharing, gf.as_ref()).unwrap();
-    }
-}
-
-#[tokio::test]
-#[serial]
-async fn zero() {
-    let proto_id = b"protocol".to_vec();
-
-    let (gf, pss, contexts) = setup().await;
-    let super_inv_matrix = Arc::new(math::super_inv_matrix(N, N - T, gf.as_ref()));
-    let mut handles = Vec::new();
-
-    for context in contexts {
-        let context = preproc::ZeroContext::new(super_inv_matrix.clone(), &context);
-        handles.push(spawn(preproc::zero(proto_id.clone(), context)));
-    }
-
-    let mut sharings = vec![Vec::with_capacity(N); N - T];
-
-    for handle in handles {
-        let shares = handle.await.unwrap();
-
-        assert_eq!(shares.len(), N - T);
-
-        for (i, share) in shares.into_iter().enumerate() {
-            sharings[i].push(share);
-        }
-    }
-
-    let exp_out = vec![gf.zero(); L];
-
-    for sharing in sharings {
-        assert_eq!(exp_out, pss.recon_n(&sharing, gf.as_ref()));
-    }
-}
-
-#[tokio::test]
-#[serial]
-async fn randbit() {
-    let proto_id = b"protocol".to_vec();
-
-    let (gf, pss, contexts) = setup().await;
-
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("tests/data/n16_t5.txt");
-    let bin_supinv_matrix = Arc::new(math::binary_super_inv_matrix(&path, &gf));
-
-    let mut handles = Vec::new();
-    for context in contexts {
-        let context = preproc::RandBitContext::new(bin_supinv_matrix.clone(), &context);
-        handles.push(spawn(preproc::randbit(proto_id.clone(), context)));
-    }
-
-    let mut sharings = vec![Vec::with_capacity(N); bin_supinv_matrix.len()];
-
-    for handle in handles {
-        let shares = handle.await.unwrap();
-
-        assert_eq!(shares.len(), bin_supinv_matrix.len());
-
-        for (i, share) in shares.into_iter().enumerate() {
-            sharings[i].push(share);
-        }
-    }
-
-    for sharing in sharings {
-        let secrets = pss.semihon_recon(&sharing, gf.as_ref());
-        for secret in secrets {
-            assert!((secret == gf.one()) || (secret == gf.zero()));
-        }
-    }
-}
-
-#[tokio::test]
-#[serial]
 async fn reduce_degree() {
     let mut rng = StdRng::seed_from_u64(200);
     let proto_id = b"protocol".to_vec();
 
-    let (gf, pss, contexts) = setup().await;
+    let (pss, pss_n, contexts) = setup().await;
 
-    let secrets: Vec<_> = gf.get_range(1..(L + 1).try_into().unwrap()).collect();
-    let x_shares = pss.share(&secrets, gf.as_ref(), &mut rng);
-    let zero_shares = pss.share(&vec![gf.zero(); L], gf.as_ref(), &mut rng);
-    let rand_shares = pss.rand(gf.as_ref(), &mut rng);
+    let secrets = Array2::from_shape_vec(
+        (NUM, L),
+        (0..(NUM * L)).map(|_| GF::<W>::rand(&mut rng)).collect(),
+    )
+    .unwrap();
+    let vx = shares(secrets.view(), &pss, &mut rng);
+    let zero_shares = shares(Array2::zeros((NUM, L)).view(), &pss_n, &mut rng);
+    let rand_shares = rand_shares(NUM, &pss, &mut rng);
 
     let mut handles = Vec::new();
-    for (i, context) in contexts.into_iter().enumerate() {
+    for (i, (net, context)) in contexts.into_iter().enumerate() {
         handles.push(spawn(core::reduce_degree(
             proto_id.clone(),
-            x_shares[i],
-            rand_shares[i],
-            zero_shares[i],
+            vx.slice(s![.., i]).to_owned(),
+            rand_shares.slice(s![.., i]).to_owned(),
+            zero_shares.slice(s![.., i]).to_owned(),
             context,
+            net,
         )));
     }
 
-    let mut out_shares = Vec::with_capacity(N);
+    let mut out_shares = Vec::with_capacity(N * NUM);
     for handle in handles {
-        out_shares.push(handle.await.unwrap());
+        out_shares.extend_from_slice(handle.await.unwrap().view().to_slice().unwrap());
     }
-
-    let out_secrets = pss.recon(&out_shares, gf.as_ref()).unwrap();
-
+    let out_secrets = Array2::from_shape_vec(
+        (NUM, L),
+        Array2::from_shape_vec((N, NUM), out_shares)
+            .unwrap()
+            .axis_iter(Axis(1))
+            .flat_map(|s| pss.semihon_recon(s))
+            .collect(),
+    )
+    .unwrap();
     assert_eq!(out_secrets, secrets);
 }
 
 #[tokio::test]
-#[serial]
 async fn mult() {
     let mut rng = StdRng::seed_from_u64(200);
     let proto_id = b"protocol".to_vec();
 
-    let (gf, pss, contexts) = setup().await;
+    let (pss, pss_n, contexts) = setup().await;
 
-    let x_secrets: Vec<_> = gf.get_range(1..(L + 1).try_into().unwrap()).collect();
-    let y_secrets: Vec<_> = gf
-        .get_range((L + 1).try_into().unwrap()..(2 * L + 1).try_into().unwrap())
-        .collect();
-    let x_shares = pss.share(&x_secrets, gf.as_ref(), &mut rng);
-    let y_shares = pss.share(&y_secrets, gf.as_ref(), &mut rng);
-    let zero_shares = pss.share(&vec![gf.zero(); L], gf.as_ref(), &mut rng);
-    let rand_shares = pss.rand(gf.as_ref(), &mut rng);
+    let x_secrets = Array2::from_shape_vec(
+        (NUM, L),
+        (0..(NUM * L)).map(|_| GF::<W>::rand(&mut rng)).collect(),
+    )
+    .unwrap();
+    let y_secrets = Array2::from_shape_vec(
+        (NUM, L),
+        (0..(NUM * L)).map(|_| GF::<W>::rand(&mut rng)).collect(),
+    )
+    .unwrap();
+    let vx = shares(x_secrets.view(), &pss, &mut rng);
+    let vy = shares(y_secrets.view(), &pss, &mut rng);
+    let zero_shares = shares(Array2::zeros((NUM, L)).view(), &pss_n, &mut rng);
+    let rand_shares = rand_shares(NUM, &pss, &mut rng);
 
     let mut handles = Vec::new();
-    for (i, context) in contexts.into_iter().enumerate() {
+    for (i, (net, context)) in contexts.into_iter().enumerate() {
         handles.push(spawn(core::mult(
             proto_id.clone(),
-            x_shares[i],
-            y_shares[i],
-            rand_shares[i],
-            zero_shares[i],
+            vx.slice(s![.., i]).to_owned(),
+            vy.slice(s![.., i]).to_owned(),
+            rand_shares.slice(s![.., i]).to_owned(),
+            zero_shares.slice(s![.., i]).to_owned(),
             context,
+            net,
         )));
     }
 
-    let mut out_shares = Vec::with_capacity(N);
+    let mut out_shares = Vec::with_capacity(N * NUM);
     for handle in handles {
-        out_shares.push(handle.await.unwrap());
+        out_shares.extend_from_slice(handle.await.unwrap().view().to_slice().unwrap());
     }
-
-    let out_secrets = pss.recon(&out_shares, gf.as_ref()).unwrap();
-    let exp: Vec<_> = x_secrets
-        .into_iter()
-        .zip(y_secrets.into_iter())
-        .map(|(xval, yval)| xval * yval)
-        .collect();
-
-    assert_eq!(out_secrets, exp);
+    let out_secrets = Array2::from_shape_vec(
+        (NUM, L),
+        Array2::from_shape_vec((N, NUM), out_shares)
+            .unwrap()
+            .axis_iter(Axis(1))
+            .flat_map(|s| pss.semihon_recon(s))
+            .collect(),
+    )
+    .unwrap();
+    assert_eq!(out_secrets, x_secrets * y_secrets);
 }
 
 #[tokio::test]
-#[serial]
-async fn trans() {
-    let mut rng = StdRng::seed_from_u64(200);
+async fn rand() {
     let proto_id = b"protocol".to_vec();
 
-    let (gf, pss, contexts) = setup().await;
-
-    let l: u32 = L.try_into().unwrap();
-    let secrets: Vec<_> = gf.get_range(1..(l + 1)).collect();
-    let rand_secrets: Vec<_> = (0..l).map(|_| gf.rand(&mut rng)).collect();
-    let old_pos: Vec<_> = gf.get_range(200..(200 + l)).collect();
-    let new_pos: Vec<_> = gf.get_range(300..(300 + l)).collect();
-    let f_trans = Combination::new(vec![1, 2, 1]);
-
-    let old_shares = {
-        let coeffs = pss.share_coeffs(&old_pos, gf.as_ref());
-        pss.share_using_coeffs(secrets.clone(), &coeffs, gf.as_ref(), &mut rng)
-    };
-    let random_n = {
-        let coeffs = pss.share_coeffs_n(&old_pos, gf.as_ref());
-        pss.share_using_coeffs(rand_secrets.clone(), &coeffs, gf.as_ref(), &mut rng)
-    };
-    let random = {
-        let coeffs = pss.share_coeffs(&new_pos, gf.as_ref());
-        pss.share_using_coeffs(f_trans.apply(&rand_secrets), &coeffs, gf.as_ref(), &mut rng)
-    };
-
+    let (pss, _, contexts) = setup().await;
+    let super_inv_matrix = Arc::new(math::super_inv_matrix(N, N - T));
     let mut handles = Vec::new();
-    for (i, context) in contexts.into_iter().enumerate() {
-        let transform = core::SharingTransform::new(&old_pos, &new_pos, f_trans.clone(), &pss, &gf);
 
-        handles.push(spawn(core::trans(
+    for (net, context) in contexts {
+        let context = preproc::RandContext::new(super_inv_matrix.clone(), &context);
+        handles.push(spawn(preproc::rand(
             proto_id.clone(),
-            old_shares[i],
-            random[i],
-            random_n[i],
-            transform,
+            NUM * (N - T),
             context,
+            net,
         )));
     }
 
-    let mut out_shares = Vec::with_capacity(N);
-    for handle in handles {
-        out_shares.push(handle.await.unwrap());
-    }
-
-    let recon_coeffs = pss.recon_coeffs_n(&new_pos, gf.as_ref());
-    let out_secrets: Vec<_> =
-        math::utils::matrix_vector_prod(&recon_coeffs, &out_shares, gf.as_ref()).collect();
-
-    assert_eq!(out_secrets, f_trans.apply(&secrets));
-}
-
-#[tokio::test]
-#[serial]
-async fn trans_incomplete_block() {
-    let mut rng = StdRng::seed_from_u64(200);
-    let proto_id = b"protocol".to_vec();
-
-    let (gf, pss, contexts) = setup().await;
-
-    let secrets = vec![gf.get(37)];
-    let rand_secrets = vec![gf.rand(&mut rng)];
-    let old_pos = vec![gf.get(200)];
-    let new_pos = vec![gf.get(300), gf.get(301)];
-    let f_trans = Combination::new(vec![0, 0]);
-
-    let old_shares = {
-        let coeffs = pss.share_coeffs(&old_pos, gf.as_ref());
-        pss.share_using_coeffs(secrets.clone(), &coeffs, gf.as_ref(), &mut rng)
-    };
-    let random_n = {
-        let coeffs = pss.share_coeffs_n(&old_pos, gf.as_ref());
-        pss.share_using_coeffs(rand_secrets.clone(), &coeffs, gf.as_ref(), &mut rng)
-    };
-    let random = {
-        let coeffs = pss.share_coeffs(&new_pos, gf.as_ref());
-        pss.share_using_coeffs(f_trans.apply(&rand_secrets), &coeffs, gf.as_ref(), &mut rng)
-    };
-
-    let mut handles = Vec::new();
-    for (i, context) in contexts.into_iter().enumerate() {
-        let transform = core::SharingTransform::new(&old_pos, &new_pos, f_trans.clone(), &pss, &gf);
-
-        handles.push(spawn(core::trans(
-            proto_id.clone(),
-            old_shares[i],
-            random[i],
-            random_n[i],
-            transform,
-            context,
-        )));
-    }
-
-    let mut out_shares = Vec::with_capacity(N);
-    for handle in handles {
-        out_shares.push(handle.await.unwrap());
-    }
-
-    let recon_coeffs = pss.recon_coeffs_n(&new_pos, gf.as_ref());
-    let out_secrets: Vec<_> =
-        math::utils::matrix_vector_prod(&recon_coeffs, &out_shares, gf.as_ref()).collect();
-
-    assert_eq!(out_secrets, f_trans.apply(&secrets));
-}
-
-#[tokio::test]
-#[serial]
-async fn randtrans() {
-    let mut rng = StdRng::seed_from_u64(200);
-    let proto_id = b"protocol".to_vec();
-
-    let (gf, pss, contexts) = setup().await;
-
-    let l: u32 = L.try_into().unwrap();
-    let old_pos: Vec<Vec<galois::GFElement>> = vec![
-        gf.get_range(200..(200 + l)).collect(),
-        gf.get_range(250..(250 + l)).collect(),
-        gf.get_range(225..(225 + l)).collect(),
-    ];
-    let new_pos: Vec<_> = vec![
-        gf.get_range(300..(300 + l)).collect(),
-        gf.get_range(350..(350 + l)).collect(),
-        gf.get_range(325..(325 + l)).collect(),
-    ];
-    let f_trans = vec![
-        Combination::new((0..L).collect()),
-        Combination::new(vec![2, 1, 0]),
-        Combination::new(vec![2, 0, 2]),
-    ];
-
-    let randoms: Vec<_> = (0..(N + T))
-        .map(|_| pss.rand(gf.as_ref(), &mut rng))
-        .collect();
-    let zeros: Vec<_> = {
-        let secrets = vec![gf.zero(); L];
-        (0..(2 * N))
-            .map(|_| pss.share_n(&secrets, gf.as_ref(), &mut rng))
-            .collect()
-    };
-
-    let mut handles = Vec::new();
-    for (i, context) in contexts.into_iter().enumerate() {
-        let randoms: Vec<_> = randoms.iter().map(|v| v[i]).collect();
-        let zeros: Vec<_> = zeros.iter().map(|v| v[i]).collect();
-        let transform = core::RandSharingTransform::new(
-            i.try_into().unwrap(),
-            &old_pos,
-            &new_pos,
-            &f_trans,
-            pss.as_ref(),
-            gf.as_ref(),
-        );
-
-        handles.push(spawn(core::randtrans(
-            proto_id.clone(),
-            randoms,
-            zeros,
-            transform,
-            context,
-        )));
-    }
-
-    let mut sharings = vec![Vec::with_capacity(N); L];
-    let mut sharings_n = vec![Vec::with_capacity(N); L];
+    let mut sharings = Vec::with_capacity(N * NUM * (N - T));
     for handle in handles {
         let shares = handle.await.unwrap();
-        for (i, share) in shares.into_iter().enumerate() {
-            sharings[i].push(share.0);
-            sharings_n[i].push(share.1);
-        }
+        assert_eq!(shares.len(), NUM * (N - T));
+        sharings.extend_from_slice(shares.as_slice().unwrap());
     }
+    let sharings = Array2::from_shape_vec((N, NUM * (N - T)), sharings).unwrap();
 
-    for (i, (sharing, sharing_n)) in sharings.into_iter().zip(sharings_n.into_iter()).enumerate() {
-        let secrets: Vec<_> = {
-            let coeffs = pss.recon_coeffs_n(&new_pos[i], gf.as_ref());
-            math::utils::matrix_vector_prod(&coeffs, &sharing, gf.as_ref()).collect()
-        };
-
-        let secrets_n: Vec<_> = {
-            let coeffs = pss.recon_coeffs_n(&old_pos[i], gf.as_ref());
-            math::utils::matrix_vector_prod(&coeffs, &sharing_n, gf.as_ref()).collect()
-        };
-
-        assert_eq!(secrets, f_trans[i].apply(&secrets_n));
+    for s in sharings.axis_iter(Axis(1)) {
+        pss.recon(s).unwrap();
     }
 }
 
 #[tokio::test]
-#[serial]
-async fn randtrans_incomplete_block() {
-    let mut rng = StdRng::seed_from_u64(200);
+async fn zero() {
     let proto_id = b"protocol".to_vec();
 
-    let (gf, pss, contexts) = setup().await;
-
-    let l: u32 = L.try_into().unwrap();
-    let old_pos: Vec<Vec<galois::GFElement>> =
-        vec![vec![gf.get(200)], gf.get_range(225..(225 + l)).collect()];
-    let new_pos: Vec<_> = vec![
-        vec![gf.get(300), gf.get(301), gf.get(302)],
-        vec![gf.get(325)],
-    ];
-    let f_trans = vec![Combination::new(vec![0, 0, 0]), Combination::new(vec![1])];
-
-    let randoms: Vec<_> = (0..(N + T))
-        .map(|_| pss.rand(gf.as_ref(), &mut rng))
-        .collect();
-    let zeros: Vec<_> = {
-        let secrets = vec![gf.zero(); L];
-        (0..(2 * N))
-            .map(|_| pss.share_n(&secrets, gf.as_ref(), &mut rng))
-            .collect()
-    };
-
+    let (_, pss_n, contexts) = setup().await;
+    let super_inv_matrix = Arc::new(math::super_inv_matrix(N, N - T));
     let mut handles = Vec::new();
-    for (i, context) in contexts.into_iter().enumerate() {
-        let randoms: Vec<_> = randoms.iter().map(|v| v[i]).collect();
-        let zeros: Vec<_> = zeros.iter().map(|v| v[i]).collect();
-        let transform = core::RandSharingTransform::new(
-            i.try_into().unwrap(),
-            &old_pos,
-            &new_pos,
-            &f_trans,
-            pss.as_ref(),
-            gf.as_ref(),
-        );
 
-        handles.push(spawn(core::randtrans(
+    for (net, context) in contexts {
+        let context = preproc::ZeroContext::new(super_inv_matrix.clone(), &context);
+        handles.push(spawn(preproc::zero(
             proto_id.clone(),
-            randoms,
-            zeros,
-            transform,
+            NUM * (N - T),
             context,
+            net,
         )));
     }
 
-    let mut sharings = vec![Vec::with_capacity(N); 2];
-    let mut sharings_n = vec![Vec::with_capacity(N); 2];
+    let mut sharings = Vec::with_capacity(N * NUM * (N - T));
     for handle in handles {
         let shares = handle.await.unwrap();
-        for i in 0..2 {
-            sharings[i].push(shares[i].0);
-            sharings_n[i].push(shares[i].1);
-        }
+        assert_eq!(shares.len(), NUM * (N - T));
+        sharings.extend_from_slice(shares.as_slice().unwrap());
     }
+    let sharings = Array2::from_shape_vec((N, NUM * (N - T)), sharings).unwrap();
 
-    for (i, (sharing, sharing_n)) in sharings.into_iter().zip(sharings_n.into_iter()).enumerate() {
-        if i >= 2 {
-            assert_eq!(sharing, vec![gf.get(0); N]);
-            assert_eq!(sharing_n, vec![gf.get(0); N]);
-        }
-
-        let secrets: Vec<_> = {
-            let coeffs = pss.recon_coeffs_n(&new_pos[i], gf.as_ref());
-            math::utils::matrix_vector_prod(&coeffs, &sharing, gf.as_ref()).collect()
-        };
-
-        let secrets_n: Vec<_> = {
-            let coeffs = pss.recon_coeffs_n(&old_pos[i], gf.as_ref());
-            math::utils::matrix_vector_prod(&coeffs, &sharing_n, gf.as_ref()).collect()
-        };
-
-        assert_eq!(secrets, f_trans[i].apply(&secrets_n));
+    let exp_out = vec![GF::ZERO; L];
+    for s in sharings.axis_iter(Axis(1)) {
+        assert_eq!(pss_n.semihon_recon(s), exp_out);
     }
 }
 
 #[tokio::test]
-#[serial]
-async fn garble() {
+async fn randbit() {
+    let proto_id = b"protocol".to_vec();
+
+    let (pss, _, contexts) = setup().await;
+
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("tests/data/n16_t5.txt");
+    let bin_supinv_matrix = Arc::new(math::binary_super_inv_matrix(&path));
+    let batch_size = bin_supinv_matrix.shape()[0];
+
+    let mut handles = Vec::new();
+    for (net, context) in contexts {
+        let context = preproc::RandBitContext::new(bin_supinv_matrix.clone(), &context);
+        handles.push(spawn(preproc::randbit(
+            proto_id.clone(),
+            NUM * batch_size,
+            context,
+            net,
+        )));
+    }
+
+    let mut sharings = Vec::with_capacity(N * NUM * batch_size);
+    for handle in handles {
+        let shares = handle.await.unwrap();
+        assert_eq!(shares.len(), NUM * batch_size);
+        sharings.extend_from_slice(shares.as_slice().unwrap());
+    }
+    let sharings = Array2::from_shape_vec((N, NUM * batch_size), sharings).unwrap();
+
+    for s in sharings.axis_iter(Axis(1)) {
+        let secrets = pss.recon(s).unwrap();
+        for secret in secrets {
+            assert!(secret == GF::ZERO || secret == GF::ONE);
+        }
+    }
+}
+
+#[tokio::test]
+async fn preproc() {
     let circ = {
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         path.push("tests/data/sub64.txt");
@@ -515,89 +288,32 @@ async fn garble() {
 
     let (_, _, contexts) = setup().await;
 
-    let mut handles = Vec::new();
-    for (i, context) in contexts.into_iter().enumerate() {
-        let circ = circ.clone();
-        let preproc = preproc::PreProc::dummy(i.try_into().unwrap(), 200, &circ, &context);
-        let context = Arc::new(garble::GarbleContextData::new(circ, context));
-        handles.push(spawn(async move {
-            garble::garble(b"".to_vec(), preproc, context).await
-        }))
-    }
-
-    for handle in handles {
-        let gc = handle.await.unwrap();
-
-        assert_eq!(gc.gates.len(), circ.gates().len());
-
-        for gate in gc.gates {
-            match gate {
-                garble::GarbledGate::And(table) => {
-                    assert_eq!(table.ctxs.len(), 4);
-                    for ctx in table.ctxs {
-                        assert_eq!(ctx.len(), LPN_MSSG_LEN);
-                    }
-                }
-                garble::GarbledGate::Xor(table) => {
-                    assert_eq!(table.ctxs.len(), 4);
-                    for ctx in table.ctxs {
-                        assert_eq!(ctx.len(), LPN_MSSG_LEN);
-                    }
-                }
-                garble::GarbledGate::Inv(table) => {
-                    assert_eq!(table.ctxs.len(), 2);
-                    for ctx in table.ctxs {
-                        assert_eq!(ctx.len(), LPN_MSSG_LEN);
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[tokio::test]
-#[serial]
-async fn preproc() {
-    let circ = {
-        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.push("tests/data/sub64.txt");
-        let circ = Circuit::from_bristol_fashion(&path);
-        circ.pack(L as u32)
-    };
-
-    let (gf, _, contexts) = setup().await;
-
     let bin_supinv_matrix = {
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         path.push("tests/data/n16_t5.txt");
-        Arc::new(math::binary_super_inv_matrix(&path, gf.as_ref()))
+        Arc::new(math::binary_super_inv_matrix(&path))
     };
 
-    let super_inv_matrix = Arc::new(math::super_inv_matrix(N, N - T, gf.as_ref()));
+    let super_inv_matrix = Arc::new(math::super_inv_matrix(N, N - T));
 
-    let (num_and, num_xor, num_inv) = circ.get_gate_counts();
-
-    let dummy_preproc = preproc::PreProc::dummy(0, 0, &circ, &contexts[0]);
+    let dummy_preproc = preproc::PreProc::dummy(0, 0, &circ, &contexts[0].1);
+    let desc = preproc::PreProc::describe(&circ, &contexts[0].1);
 
     let mut handles = Vec::new();
-    for context in contexts {
+    for (net, context) in contexts {
         let rcontext = preproc::RandContext::new(super_inv_matrix.clone(), &context);
         let zcontext = preproc::ZeroContext::new(super_inv_matrix.clone(), &context);
         let bcontext = preproc::RandBitContext::new(bin_supinv_matrix.clone(), &context);
-        let circ = circ.clone();
 
         handles.push(spawn(async move {
             preproc::preproc(
                 b"".to_vec(),
-                10,
-                circ.inputs().len(),
-                num_and,
-                num_xor,
-                num_inv,
+                desc,
                 context,
                 rcontext,
                 zcontext,
                 bcontext,
+                net,
             )
             .await
         }))
@@ -606,19 +322,334 @@ async fn preproc() {
     for handle in handles {
         let preproc = handle.await.unwrap();
 
-        assert_eq!(preproc.masks.len(), dummy_preproc.masks.len());
+        assert_eq!(preproc.masks.shape(), dummy_preproc.masks.shape());
+        assert_eq!(preproc.keys.shape(), dummy_preproc.keys.shape());
+        assert_eq!(preproc.errors.shape(), dummy_preproc.errors.shape());
+        assert!(preproc.randoms.shape() <= dummy_preproc.randoms.shape());
+        assert!(preproc.zeros.shape() <= dummy_preproc.zeros.shape());
+    }
+}
 
-        assert_eq!(preproc.keys.len(), dummy_preproc.keys.len());
-        assert_eq!(preproc.keys[0].len(), dummy_preproc.keys[0].len());
-        assert_eq!(preproc.keys[1].len(), dummy_preproc.keys[1].len());
-        for i in 0..(preproc.keys[0].len()) {
-            assert_eq!(preproc.keys[0][i].len(), dummy_preproc.keys[0][i].len());
-            assert_eq!(preproc.keys[1][i].len(), dummy_preproc.keys[1][i].len());
+#[tokio::test]
+async fn trans() {
+    let mut rng = StdRng::seed_from_u64(200);
+    let proto_id = b"protocol".to_vec();
+
+    let (_, _, contexts) = setup().await;
+
+    let secrets = Array2::from_shape_vec(
+        (NUM, L),
+        (0..(NUM * L)).map(|_| GF::<W>::rand(&mut rng)).collect(),
+    )
+    .unwrap();
+    let rand_secrets = Array2::from_shape_vec(
+        (NUM, L),
+        (0..(NUM * L)).map(|_| GF::<W>::rand(&mut rng)).collect(),
+    )
+    .unwrap();
+    let old_pos: Vec<_> = (200..(200 + L).try_into().unwrap()).map(GF::from).collect();
+    let new_pos: Vec<_> = (300..(300 + L).try_into().unwrap()).map(GF::from).collect();
+    let f_trans = Combination::new(vec![1, 2, 1]);
+
+    let pss_old = PackedSharing::new(
+        (T + L - 1).try_into().unwrap(),
+        N.try_into().unwrap(),
+        &old_pos,
+    );
+    let pss_n_old =
+        PackedSharing::new((N - 1).try_into().unwrap(), N.try_into().unwrap(), &old_pos);
+    let pss_new = PackedSharing::new(
+        (T + L - 1).try_into().unwrap(),
+        N.try_into().unwrap(),
+        &new_pos,
+    );
+
+    let old_shares = shares(secrets.view(), &pss_old, &mut rng);
+    let random_n = shares(rand_secrets.view(), &pss_n_old, &mut rng);
+    let random = {
+        let tf_rand_secrets = rand_secrets
+            .rows()
+            .into_iter()
+            .flat_map(|row| f_trans.apply(row))
+            .collect();
+        let tf_rand_secrets = Array2::from_shape_vec((NUM, L), tf_rand_secrets).unwrap();
+        shares(tf_rand_secrets.view(), &pss_new, &mut rng)
+    };
+
+    let mut handles = Vec::new();
+    for (i, (net, context)) in contexts.into_iter().enumerate() {
+        let transform = core::SharingTransform::new(&old_pos, &new_pos, f_trans.clone(), &context);
+
+        handles.push(spawn(core::trans(
+            proto_id.clone(),
+            old_shares.slice(s![.., i]).to_owned(),
+            random.slice(s![.., i]).to_owned(),
+            random_n.slice(s![.., i]).to_owned(),
+            transform,
+            context,
+            net,
+        )));
+    }
+
+    let mut out_shares = Vec::with_capacity(N * NUM);
+    for handle in handles {
+        out_shares.extend_from_slice(handle.await.unwrap().view().to_slice().unwrap());
+    }
+
+    let exp_secrets = {
+        let secrets = secrets
+            .rows()
+            .into_iter()
+            .flat_map(|row| f_trans.apply(row))
+            .collect();
+        Array2::from_shape_vec((NUM, L), secrets).unwrap()
+    };
+
+    let out_secrets = Array2::from_shape_vec(
+        (NUM, L),
+        Array2::from_shape_vec((N, NUM), out_shares)
+            .unwrap()
+            .axis_iter(Axis(1))
+            .flat_map(|s| pss_new.recon(s).unwrap())
+            .collect(),
+    )
+    .unwrap();
+    assert_eq!(out_secrets, exp_secrets);
+}
+
+#[tokio::test]
+async fn trans_incomplete_block() {
+    let mut rng = StdRng::seed_from_u64(200);
+    let proto_id = b"protocol".to_vec();
+
+    let (_, _, contexts) = setup().await;
+
+    let secrets = Array2::from_shape_vec(
+        (NUM, 1),
+        (0..NUM).map(|_| GF::<W>::rand(&mut rng)).collect(),
+    )
+    .unwrap();
+    let rand_secrets = Array2::from_shape_vec(
+        (NUM, 1),
+        (0..NUM).map(|_| GF::<W>::rand(&mut rng)).collect(),
+    )
+    .unwrap();
+    let old_pos = vec![GF::from(200u32)];
+    let new_pos = vec![GF::from(300u32), GF::from(301u32)];
+    let f_trans = Combination::new(vec![0, 0]);
+
+    let pss_old = PackedSharing::new(
+        (T + L - 1).try_into().unwrap(),
+        N.try_into().unwrap(),
+        &old_pos,
+    );
+    let pss_n_old =
+        PackedSharing::new((N - 1).try_into().unwrap(), N.try_into().unwrap(), &old_pos);
+    let pss_new = PackedSharing::new(
+        (T + L - 1).try_into().unwrap(),
+        N.try_into().unwrap(),
+        &new_pos,
+    );
+
+    let old_shares = shares(secrets.view(), &pss_old, &mut rng);
+    let random_n = shares(rand_secrets.view(), &pss_n_old, &mut rng);
+    let random = {
+        let tf_rand_secrets = rand_secrets
+            .rows()
+            .into_iter()
+            .flat_map(|row| f_trans.apply(row))
+            .collect();
+        let tf_rand_secrets = Array2::from_shape_vec((NUM, 2), tf_rand_secrets).unwrap();
+        shares(tf_rand_secrets.view(), &pss_new, &mut rng)
+    };
+
+    let mut handles = Vec::new();
+    for (i, (net, context)) in contexts.into_iter().enumerate() {
+        let transform = core::SharingTransform::new(&old_pos, &new_pos, f_trans.clone(), &context);
+
+        handles.push(spawn(core::trans(
+            proto_id.clone(),
+            old_shares.slice(s![.., i]).to_owned(),
+            random.slice(s![.., i]).to_owned(),
+            random_n.slice(s![.., i]).to_owned(),
+            transform,
+            context,
+            net,
+        )));
+    }
+
+    let mut out_shares = Vec::with_capacity(N * NUM);
+    for handle in handles {
+        out_shares.extend_from_slice(handle.await.unwrap().view().to_slice().unwrap());
+    }
+
+    let exp_secrets = {
+        let secrets = secrets
+            .rows()
+            .into_iter()
+            .flat_map(|row| f_trans.apply(row))
+            .collect();
+        Array2::from_shape_vec((NUM, 2), secrets).unwrap()
+    };
+
+    let out_secrets = Array2::from_shape_vec(
+        (NUM, 2),
+        Array2::from_shape_vec((N, NUM), out_shares)
+            .unwrap()
+            .axis_iter(Axis(1))
+            .flat_map(|s| pss_new.recon(s).unwrap())
+            .collect(),
+    )
+    .unwrap();
+    assert_eq!(out_secrets, exp_secrets);
+}
+
+#[tokio::test]
+async fn randtrans() {
+    let mut rng = StdRng::seed_from_u64(200);
+    let proto_id = b"protocol".to_vec();
+
+    let (pss, pss_n, contexts) = setup().await;
+
+    let l: u32 = L.try_into().unwrap();
+    let old_pos: Vec<Vec<GF<W>>> = vec![
+        (200..(200 + l)).map(GF::from).collect(),
+        (250..(250 + l)).map(GF::from).collect(),
+        (225..(225 + l)).map(GF::from).collect(),
+    ];
+    let new_pos: Vec<Vec<GF<W>>> = vec![
+        (300..(300 + l)).map(GF::from).collect(),
+        (350..(350 + l)).map(GF::from).collect(),
+        (325..(325 + l)).map(GF::from).collect(),
+    ];
+    let f_trans = vec![
+        Combination::new((0..L).collect()),
+        Combination::new(vec![2, 1, 0]),
+        Combination::new(vec![2, 0, 2]),
+    ];
+
+    let rand_shares = rand_shares(NUM * (N + T), &pss, &mut rng);
+    let zero_shares = shares(Array2::zeros((NUM * 2 * N, L)).view(), &pss_n, &mut rng);
+
+    let mut handles = Vec::new();
+    for (i, (net, context)) in contexts.into_iter().enumerate() {
+        let transform = core::RandSharingTransform::new(&old_pos, &new_pos, &f_trans, &context);
+
+        let mut transforms = Vec::with_capacity(NUM);
+        for _ in 0..NUM {
+            transforms.push(transform.clone());
         }
 
-        assert_eq!(preproc.errors.len(), dummy_preproc.errors.len());
+        handles.push(spawn(core::randtrans(
+            proto_id.clone(),
+            rand_shares.slice(s![.., i]).to_vec(),
+            zero_shares.slice(s![.., i]).to_vec(),
+            transforms,
+            context,
+            net,
+        )));
+    }
 
-        assert!(preproc.randoms.len() <= dummy_preproc.randoms.len() + N - T);
-        assert!(preproc.zeros.len() <= dummy_preproc.zeros.len() + N - T);
+    let mut sharings = Array3::zeros((0, NUM, L));
+    let mut sharings_n = Array3::zeros((0, NUM, L));
+    for handle in handles {
+        let (shares, shares_n) = handle.await.unwrap();
+        sharings.push(Axis(0), shares.view()).unwrap();
+        sharings_n.push(Axis(0), shares_n.view()).unwrap();
+    }
+
+    for i in 0..L {
+        let orec_coeffs = PackedSharing::compute_recon_coeffs(
+            (N - 1).try_into().unwrap(),
+            N.try_into().unwrap(),
+            &old_pos[i],
+        );
+        let nrec_coeffs = PackedSharing::compute_recon_coeffs(
+            (T + L - 1).try_into().unwrap(),
+            N.try_into().unwrap(),
+            &new_pos[i],
+        );
+
+        for j in 0..NUM {
+            let osec = PackedSharing::recon_using_coeffs(
+                sharings_n.slice(s![.., j, i]),
+                orec_coeffs.view(),
+            );
+            let nsec =
+                PackedSharing::recon_using_coeffs(sharings.slice(s![.., j, i]), nrec_coeffs.view());
+            debug_assert_eq!(nsec.to_vec(), f_trans[i].apply(ArrayView1::from(&osec)));
+        }
+    }
+}
+
+#[tokio::test]
+async fn randtrans_incomplete_block() {
+    let mut rng = StdRng::seed_from_u64(200);
+    let proto_id = b"protocol".to_vec();
+
+    let (pss, pss_n, contexts) = setup().await;
+
+    let l: u32 = L.try_into().unwrap();
+    let old_pos: Vec<Vec<GF<W>>> = vec![
+        vec![GF::from(200)],
+        (225..(225 + l)).map(GF::from).collect(),
+    ];
+    let new_pos: Vec<Vec<GF<W>>> = vec![
+        vec![GF::from(300), GF::from(301), GF::from(302)],
+        vec![GF::from(325)],
+    ];
+    let f_trans = vec![Combination::new(vec![0, 0, 0]), Combination::new(vec![1])];
+
+    let rand_shares = rand_shares(NUM * (N + T), &pss, &mut rng);
+    let zero_shares = shares(Array2::zeros((NUM * 2 * N, L)).view(), &pss_n, &mut rng);
+
+    let mut handles = Vec::new();
+    for (i, (net, context)) in contexts.into_iter().enumerate() {
+        let transform = core::RandSharingTransform::new(&old_pos, &new_pos, &f_trans, &context);
+
+        let mut transforms = Vec::with_capacity(NUM);
+        for _ in 0..NUM {
+            transforms.push(transform.clone());
+        }
+
+        handles.push(spawn(core::randtrans(
+            proto_id.clone(),
+            rand_shares.slice(s![.., i]).to_vec(),
+            zero_shares.slice(s![.., i]).to_vec(),
+            transforms,
+            context,
+            net,
+        )));
+    }
+
+    let mut sharings = Array3::zeros((0, NUM, L));
+    let mut sharings_n = Array3::zeros((0, NUM, L));
+    for handle in handles {
+        let (shares, shares_n) = handle.await.unwrap();
+        sharings.push(Axis(0), shares.view()).unwrap();
+        sharings_n.push(Axis(0), shares_n.view()).unwrap();
+    }
+
+    for i in 0..2 {
+        let orec_coeffs = PackedSharing::compute_recon_coeffs(
+            (N - 1).try_into().unwrap(),
+            N.try_into().unwrap(),
+            &old_pos[i],
+        );
+        let nrec_coeffs = PackedSharing::compute_recon_coeffs(
+            (T + L - 1).try_into().unwrap(),
+            N.try_into().unwrap(),
+            &new_pos[i],
+        );
+
+        for j in 0..NUM {
+            let osec = PackedSharing::recon_using_coeffs(
+                sharings_n.slice(s![.., j, i]),
+                orec_coeffs.view(),
+            );
+            let nsec =
+                PackedSharing::recon_using_coeffs(sharings.slice(s![.., j, i]), nrec_coeffs.view());
+            debug_assert_eq!(nsec.to_vec(), f_trans[i].apply(ArrayView1::from(&osec)));
+        }
     }
 }

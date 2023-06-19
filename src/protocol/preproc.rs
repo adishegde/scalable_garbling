@@ -1,273 +1,231 @@
 use super::core;
 use super::network;
-use super::network::{NetworkChannelBuilder, Recipient, SendMessage};
+use super::network::{Network, Recipient, SendMessage};
 use super::{MPCContext, ProtocolID, ProtocolIDBuilder};
-use crate::circuit::{PackedCircuit, PackedGate};
-use crate::math::galois::{GFMatrix, GF};
-use crate::math::utils;
+use crate::circuit::PackedCircuit;
+use crate::math::galois::GF;
 use crate::sharing::{PackedShare, PackedSharing};
 use crate::PartyID;
-use rand::{thread_rng, Rng, SeedableRng};
+use bincode::{deserialize, serialize};
+use ndarray::{parallel::prelude::*, s, Array1, Array2, Array3, ArrayView1};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::sync::Arc;
-use tokio::spawn;
+use tokio::task::spawn;
+
+fn num_batches(num: usize, batch_size: usize) -> usize {
+    (num + batch_size - 1) / batch_size
+}
 
 #[derive(Clone)]
-pub struct RandContext {
-    super_inv: Arc<GFMatrix>,
-    pss: Arc<PackedSharing>,
-    gf: Arc<GF>,
-    net_builder: NetworkChannelBuilder,
+pub struct RandContext<const W: u8> {
+    super_inv: Arc<Array2<GF<W>>>,
+    pss: Arc<PackedSharing<W>>,
     n: usize,
 }
 
-impl RandContext {
-    pub fn new(super_inv_matrix: Arc<GFMatrix>, mpc_context: &MPCContext) -> Self {
+impl<const W: u8> RandContext<W> {
+    pub fn new(super_inv_matrix: Arc<Array2<GF<W>>>, mpc_context: &MPCContext<W>) -> Self {
         Self {
             super_inv: super_inv_matrix,
             pss: mpc_context.pss.clone(),
-            gf: mpc_context.gf.clone(),
-            net_builder: mpc_context.net_builder.clone(),
             n: mpc_context.n,
         }
     }
 }
 
-pub async fn rand(id: ProtocolID, context: RandContext) -> Vec<PackedShare> {
-    let mut chan = context.net_builder.channel(id.clone());
-    let shares = {
-        let mut rng = thread_rng();
-        context.pss.rand(context.gf.as_ref(), &mut rng)
-    };
+pub async fn rand<const W: u8>(
+    id: ProtocolID,
+    num: usize,
+    context: RandContext<W>,
+    net: Network,
+) -> Array1<PackedShare<W>> {
+    let batch_size = context.super_inv.shape()[0];
+    let batches = num_batches(num, batch_size);
 
-    for (i, share) in shares.into_iter().enumerate() {
-        chan.send(SendMessage {
+    // Secret sharing random values.
+    let shares: Vec<_> = (0..batches)
+        .into_par_iter()
+        .map_init(rand::thread_rng, |rng, _| context.pss.rand(rng))
+        .flatten_iter()
+        .collect();
+    let shares = Array2::from_shape_vec((batches, context.n), shares).unwrap();
+
+    for i in 0..context.n {
+        net.send(SendMessage {
             to: Recipient::One(i as PartyID),
             proto_id: id.clone(),
-            data: context.gf.serialize_element(&share),
-        });
+            data: serialize(&shares.slice(s![.., i])).unwrap(),
+        })
+        .await;
     }
 
-    let sent_shares: Vec<_> = network::message_from_each_party(&mut chan, context.n)
+    // Receives shares from all parties.
+    let sent_shares: Vec<_> = network::message_from_each_party(id.clone(), &net, context.n)
         .await
-        .into_iter()
-        .map(|d| context.gf.deserialize_element(&d))
+        .into_par_iter()
+        .flat_map(|d| deserialize::<Array1<GF<W>>>(&d).unwrap().to_vec())
         .collect();
+    let sent_shares = Array2::from_shape_vec((context.n, batches), sent_shares).unwrap();
 
-    utils::matrix_vector_prod(
-        context.super_inv.as_ref(),
-        &sent_shares,
-        context.gf.as_ref(),
-    )
-    .collect()
+    context
+        .super_inv
+        .dot(&sent_shares)
+        .into_shape(batches * batch_size)
+        .unwrap()
 }
 
 #[derive(Clone)]
-pub struct ZeroContext {
-    super_inv: Arc<GFMatrix>,
-    pss: Arc<PackedSharing>,
-    gf: Arc<GF>,
-    net_builder: NetworkChannelBuilder,
+pub struct ZeroContext<const W: u8> {
+    super_inv: Arc<Array2<GF<W>>>,
+    pss_n: Arc<PackedSharing<W>>,
     n: usize,
-    l: usize,
 }
 
-impl ZeroContext {
-    pub fn new(super_inv_matrix: Arc<GFMatrix>, mpc_context: &MPCContext) -> Self {
+impl<const W: u8> ZeroContext<W> {
+    pub fn new(super_inv_matrix: Arc<Array2<GF<W>>>, mpc_context: &MPCContext<W>) -> Self {
         Self {
             super_inv: super_inv_matrix,
-            pss: mpc_context.pss.clone(),
-            gf: mpc_context.gf.clone(),
-            net_builder: mpc_context.net_builder.clone(),
+            pss_n: mpc_context.pss_n.clone(),
             n: mpc_context.n,
-            l: mpc_context.l,
         }
     }
 }
 
-pub async fn zero(id: ProtocolID, context: ZeroContext) -> Vec<PackedShare> {
-    let mut chan = context.net_builder.channel(id.clone());
-    let shares = {
-        let secrets = vec![context.gf.zero(); context.l];
-        let mut rng = thread_rng();
-        context.pss.share_n(&secrets, context.gf.as_ref(), &mut rng)
-    };
+pub async fn zero<const W: u8>(
+    id: ProtocolID,
+    num: usize,
+    context: ZeroContext<W>,
+    net: Network,
+) -> Array1<PackedShare<W>> {
+    let batch_size = context.super_inv.shape()[0];
+    let batches = num_batches(num, batch_size);
 
-    for (i, share) in shares.into_iter().enumerate() {
-        chan.send(SendMessage {
+    let secrets = Array1::zeros(batches);
+
+    let shares: Vec<_> = (0..batches)
+        .into_par_iter()
+        .map_init(rand::thread_rng, |rng, _| {
+            context.pss_n.share(secrets.view(), rng)
+        })
+        .flatten_iter()
+        .collect();
+    let shares = Array2::from_shape_vec((batches, context.n), shares).unwrap();
+
+    for i in 0..context.n {
+        net.send(SendMessage {
             to: Recipient::One(i as PartyID),
             proto_id: id.clone(),
-            data: context.gf.serialize_element(&share),
-        });
+            data: serialize(&shares.slice(s![.., i])).unwrap(),
+        })
+        .await;
     }
 
-    let sent_shares: Vec<_> = network::message_from_each_party(&mut chan, context.n)
+    let sent_shares: Vec<_> = network::message_from_each_party(id.clone(), &net, context.n)
         .await
-        .into_iter()
-        .map(|d| context.gf.deserialize_element(&d))
+        .into_par_iter()
+        .flat_map(|d| deserialize::<Array1<GF<W>>>(&d).unwrap().to_vec())
         .collect();
+    let sent_shares = Array2::from_shape_vec((context.n, batches), sent_shares).unwrap();
 
-    utils::matrix_vector_prod(
-        context.super_inv.as_ref(),
-        &sent_shares,
-        context.gf.as_ref(),
-    )
-    .collect()
+    context
+        .super_inv
+        .dot(&sent_shares)
+        .into_shape(batches * batch_size)
+        .unwrap()
 }
 
 #[derive(Clone)]
-pub struct RandBitContext {
-    bin_super_inv: Arc<GFMatrix>,
-    pss: Arc<PackedSharing>,
-    gf: Arc<GF>,
-    net_builder: NetworkChannelBuilder,
+pub struct RandBitContext<const W: u8> {
+    bin_super_inv: Arc<Array2<GF<W>>>,
+    pss: Arc<PackedSharing<W>>,
     n: usize,
-    l: usize,
 }
 
-impl RandBitContext {
-    pub fn new(binary_supinv_matrix: Arc<GFMatrix>, mpc_context: &MPCContext) -> Self {
+impl<const W: u8> RandBitContext<W> {
+    pub fn new(binary_supinv_matrix: Arc<Array2<GF<W>>>, mpc_context: &MPCContext<W>) -> Self {
         Self {
             bin_super_inv: binary_supinv_matrix,
             pss: mpc_context.pss.clone(),
-            gf: mpc_context.gf.clone(),
-            net_builder: mpc_context.net_builder.clone(),
             n: mpc_context.n,
-            l: mpc_context.l,
         }
     }
 }
 
-pub async fn randbit(id: ProtocolID, context: RandBitContext) -> Vec<PackedShare> {
-    let mut chan = context.net_builder.channel(id.clone());
-    let shares = {
-        let mut rng = thread_rng();
-        let secrets: Vec<_> = (0..context.l)
-            .map(|_| {
-                if rng.gen::<bool>() {
-                    context.gf.one()
-                } else {
-                    context.gf.zero()
-                }
-            })
-            .collect();
-        context.pss.share(&secrets, context.gf.as_ref(), &mut rng)
-    };
+pub async fn randbit<const W: u8>(
+    id: ProtocolID,
+    num: usize,
+    context: RandBitContext<W>,
+    net: Network,
+) -> Array1<PackedShare<W>> {
+    let batch_size = context.bin_super_inv.shape()[0];
+    let batches = num_batches(num, batch_size);
 
-    for (i, share) in shares.into_iter().enumerate() {
-        chan.send(SendMessage {
+    let shares: Vec<_> = (0..batches)
+        .into_par_iter()
+        .map_init(rand::thread_rng, |rng, _| {
+            let secrets: Vec<_> = (0..context.pss.num_secrets())
+                .map(|_| if rng.gen::<bool>() { GF::ONE } else { GF::ZERO })
+                .collect();
+            context.pss.share(ArrayView1::from(&secrets), rng)
+        })
+        .flatten_iter()
+        .collect();
+    let shares = Array2::from_shape_vec((batches, context.n), shares).unwrap();
+
+    for i in 0..context.n {
+        net.send(SendMessage {
             to: Recipient::One(i as PartyID),
             proto_id: id.clone(),
-            data: context.gf.serialize_element(&share),
-        });
+            data: serialize(&shares.slice(s![.., i])).unwrap(),
+        })
+        .await;
     }
 
-    let sent_shares: Vec<_> = network::message_from_each_party(&mut chan, context.n)
+    let sent_shares: Vec<_> = network::message_from_each_party(id.clone(), &net, context.n)
         .await
-        .into_iter()
-        .map(|d| context.gf.deserialize_element(&d))
+        .into_par_iter()
+        .flat_map(|d| deserialize::<Array1<GF<W>>>(&d).unwrap().to_vec())
         .collect();
+    let sent_shares = Array2::from_shape_vec((context.n, batches), sent_shares).unwrap();
 
-    utils::matrix_vector_prod(
-        context.bin_super_inv.as_ref(),
-        &sent_shares,
-        context.gf.as_ref(),
-    )
-    .collect()
-}
-
-pub async fn lpn_error(
-    id: ProtocolID,
-    randbits: Vec<PackedShare>,
-    randoms: Vec<PackedShare>,
-    zeros: Vec<PackedShare>,
-    context: MPCContext,
-) -> PackedShare {
-    let mut prod = randbits[0];
-
-    let mult_preproc_iter = randoms.into_iter().zip(zeros.into_iter());
-    for (inp, (r, z)) in randbits.into_iter().skip(1).zip(mult_preproc_iter) {
-        prod = core::mult(id.clone(), prod, inp, r, z, context.clone()).await;
-    }
-
-    prod
+    context
+        .bin_super_inv
+        .dot(&sent_shares)
+        .into_shape(batches * batch_size)
+        .unwrap()
 }
 
 #[derive(Clone)]
-pub struct PreProc {
+pub struct PreProc<const W: u8> {
     // Mask for each packed gate
-    pub masks: Vec<PackedShare>,
+    pub masks: Array1<PackedShare<W>>,
     // keys[b][l][g] gives the l-th index of the b-label LPN key for the g-th gate.
-    pub keys: [Vec<Vec<PackedShare>>; 2],
-    pub randoms: Vec<PackedShare>,
-    pub zeros: Vec<PackedShare>,
-    pub errors: Vec<PackedShare>,
+    pub keys: Array3<GF<W>>,
+    pub randoms: Array1<PackedShare<W>>,
+    pub zeros: Array1<PackedShare<W>>,
+    pub errors: Array1<PackedShare<W>>,
 }
 
-impl PreProc {
-    pub fn dummy(id: PartyID, seed: u64, circ: &PackedCircuit, context: &MPCContext) -> Self {
+#[derive(Clone, Copy)]
+pub struct PreProcCount {
+    masks: usize,
+    keys: (usize, usize, usize),
+    randoms: usize,
+    zeros: usize,
+    errors: usize,
+}
+
+impl PreProcCount {
+    fn new<const W: u8>(circ: &PackedCircuit, context: &MPCContext<W>) -> Self {
         let num_circ_inp_blocks = circ.inputs().len();
         let num_gate_blocks = circ.gates().len();
         let num_blocks = num_circ_inp_blocks + num_gate_blocks;
 
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-        let mut rand_gen = {
-            let small_pool: Vec<_> = (0..100)
-                .map(|_| context.pss.rand(context.gf.as_ref(), &mut rng)[id as usize])
-                .collect();
-            let mut iter = small_pool.into_iter().cycle();
-            move || iter.next().unwrap()
-        };
-        let mut zero_n_gen = {
-            let secrets = vec![context.gf.zero(); context.l];
-            let small_pool: Vec<_> = (0..100)
-                .map(|_| context.pss.share_n(&secrets, context.gf.as_ref(), &mut rng)[id as usize])
-                .collect();
-            let mut iter = small_pool.into_iter().cycle();
-            move || iter.next().unwrap()
-        };
-        let mut bit_gen = {
-            let small_pool: Vec<_> = (0..100)
-                .map(|_| {
-                    let secrets: Vec<_> = (0..context.l)
-                        .map(|_| {
-                            if rng.gen::<bool>() {
-                                context.gf.one()
-                            } else {
-                                context.gf.zero()
-                            }
-                        })
-                        .collect();
-                    context.pss.share(&secrets, context.gf.as_ref(), &mut rng)[id as usize]
-                })
-                .collect();
-            let mut iter = small_pool.into_iter().cycle();
-            move || iter.next().unwrap()
-        };
-
-        let masks = (0..num_blocks).map(|_| bit_gen()).collect();
-        let keys = [(); 2].map(|_| {
-            (0..context.lpn_key_len)
-                .map(|_| (0..num_blocks).map(|_| rand_gen()).collect())
-                .collect()
-        });
-
-        let mut num_and = 0;
-        let mut num_xor = 0;
-        let mut num_inv = 0;
-
-        for gate in circ.gates() {
-            match gate {
-                PackedGate::And(_) => num_and = num_and + 1,
-                PackedGate::Xor(_) => num_xor = num_xor + 1,
-                PackedGate::Inv(_) => num_inv = num_inv + 1,
-            }
-        }
-
+        let (num_and, num_xor, num_inv) = circ.get_gate_counts();
         let num_inp_blocks = num_and * 2 + num_xor * 2 + num_inv;
-
         let num_trans_per_wire = 2 * context.lpn_key_len + 1;
-        let num_rtrans = ((num_blocks + context.l - 1) / context.l
-            + (num_inp_blocks + context.l - 1) / context.l)
+        let num_rtrans = (num_batches(num_blocks, context.l)
+            + num_batches(num_inp_blocks, context.l))
             * num_trans_per_wire;
         let num_mult = num_and * (4 * context.lpn_mssg_len + 1)
             + num_xor * 4 * context.lpn_mssg_len
@@ -279,240 +237,164 @@ impl PreProc {
             + num_xor * 4 * context.lpn_mssg_len
             + num_inv * 2 * context.lpn_mssg_len;
 
-        let randoms = (0..num_rand).map(|_| rand_gen()).collect();
-        let zeros = (0..num_zeros).map(|_| zero_n_gen()).collect();
-        let errors = (0..num_errors).map(|_| bit_gen()).collect();
-
         Self {
-            masks,
-            keys,
-            randoms,
-            zeros,
-            errors,
+            masks: num_blocks,
+            keys: (2, context.lpn_key_len, num_blocks),
+            randoms: num_rand,
+            zeros: num_zeros,
+            errors: num_errors,
         }
     }
 }
 
-pub async fn preproc(
+impl<const W: u8> PreProc<W> {
+    pub fn describe(circ: &PackedCircuit, context: &MPCContext<W>) -> PreProcCount {
+        PreProcCount::new(circ, context)
+    }
+
+    pub fn dummy(id: PartyID, seed: u64, circ: &PackedCircuit, context: &MPCContext<W>) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        let mut rand_gen = {
+            let small_pool: Vec<_> = (0..100)
+                .map(|_| context.pss.rand(&mut rng)[id as usize])
+                .collect();
+            let mut iter = small_pool.into_iter().cycle();
+            move || iter.next().unwrap()
+        };
+
+        let zero_n_gen = {
+            let secrets = Array1::zeros(context.l);
+            let small_pool: Vec<_> = (0..100)
+                .map(|_| context.pss_n.share(secrets.view(), &mut rng)[id as usize])
+                .collect();
+            let mut iter = small_pool.into_iter().cycle();
+            move || iter.next().unwrap()
+        };
+
+        let bit_gen = {
+            let small_pool: Vec<_> = (0..100)
+                .map(|_| {
+                    let secrets: Vec<_> = (0..context.l)
+                        .map(|_| if rng.gen::<bool>() { GF::ONE } else { GF::ZERO })
+                        .collect();
+                    context.pss.share(ArrayView1::from(&secrets), &mut rng)[id as usize]
+                })
+                .collect();
+            let mut iter = small_pool.into_iter().cycle();
+            move || iter.next().unwrap()
+        };
+
+        let counts = PreProcCount::new(circ, context);
+
+        Self {
+            masks: Array1::from_shape_simple_fn(counts.masks, bit_gen),
+            keys: Array3::from_shape_simple_fn(counts.keys, &mut rand_gen),
+            randoms: Array1::from_shape_simple_fn(counts.randoms, &mut rand_gen),
+            zeros: Array1::from_shape_simple_fn(counts.zeros, zero_n_gen),
+            errors: Array1::from_shape_simple_fn(counts.errors, &mut rand_gen),
+        }
+    }
+}
+
+pub async fn preproc<const W: u8>(
     id: ProtocolID,
-    proto_batch: usize,
-    num_circ_inp_blocks: usize,
-    num_and_blocks: usize,
-    num_xor_blocks: usize,
-    num_inv_blocks: usize,
-    context: MPCContext,
-    rcontext: RandContext,
-    zcontext: ZeroContext,
-    bcontext: RandBitContext,
-) -> PreProc {
-    assert_eq!(context.lpn_tau, 2);
+    desc: PreProcCount,
+    context: MPCContext<W>,
+    rcontext: RandContext<W>,
+    zcontext: ZeroContext<W>,
+    bcontext: RandBitContext<W>,
+    net: Network,
+) -> PreProc<W> {
+    // TODO: Implement for general bais parameter.
+    debug_assert_eq!(context.lpn_tau, 2);
 
-    let num_batches = |num: usize, batch_size: usize| (num + batch_size - 1) / batch_size;
+    let mut id_gen = ProtocolIDBuilder::new(&id, 4);
 
-    let num_gate_block = num_and_blocks + num_xor_blocks + num_inv_blocks;
-    let num_blocks = num_circ_inp_blocks + num_gate_block;
-    let num_inp_blocks = num_and_blocks * 2 + num_xor_blocks * 2 + num_inv_blocks;
-
-    let num_trans_per_wire = 2 * context.lpn_key_len + 1;
-    let num_rtrans = (num_batches(num_blocks, context.l) + num_batches(num_inp_blocks, context.l))
-        * num_trans_per_wire;
-    let num_mult = num_and_blocks * (4 * context.lpn_mssg_len + 1)
-        + num_xor_blocks * 4 * context.lpn_mssg_len
-        + num_inv_blocks * 2 * context.lpn_mssg_len;
-
-    let num_masks = num_blocks;
-    let num_keys = num_blocks * 2 * context.lpn_key_len;
-    let num_rand_preproc = num_rtrans * (context.n + context.t) + num_mult;
-    let num_zeros_preproc = num_rtrans * 2 * context.n + num_mult;
-
-    let num_errors = num_and_blocks * 4 * context.lpn_mssg_len
-        + num_xor_blocks * 4 * context.lpn_mssg_len
-        + num_inv_blocks * 2 * context.lpn_mssg_len;
-
-    let num_rand_batches = num_batches(
-        num_keys + num_rand_preproc + num_errors,
-        context.n - context.t,
-    );
-    let num_zero_batches = num_batches(num_zeros_preproc + num_errors, context.n - context.t);
-    let num_rbit_batches = num_batches(num_masks + 2 * num_errors, bcontext.bin_super_inv.len());
-
-    let num_subproto = num_rand_batches + num_zero_batches + num_rbit_batches + num_errors + 10;
-    let mut id_gen = ProtocolIDBuilder::new(&id, num_subproto as u64);
-
-    let mut randoms = Vec::with_capacity(num_rand_preproc);
-    let mut zeros = Vec::with_capacity(num_zeros_preproc);
-    let mut bits = Vec::with_capacity(num_masks);
-
-    let errors = {
-        let mut res = Vec::with_capacity(num_errors);
-        let mut ctr = 0;
-
-        while ctr < num_errors {
-            let num_instances = std::cmp::min(proto_batch, num_errors - ctr);
-            let err_rand = num_batches(
-                std::cmp::max(num_instances, randoms.len()) - randoms.len(),
-                context.n - context.t,
-            );
-            let err_zero = num_batches(
-                std::cmp::max(num_instances, zeros.len()) - zeros.len(),
-                context.n - context.t,
-            );
-            let err_bits = num_batches(
-                std::cmp::max(2 * num_instances, bits.len()) - bits.len(),
-                bcontext.bin_super_inv.len(),
-            );
-
-            let mut rhandles = Vec::with_capacity(err_rand);
-            let mut zhandles = Vec::with_capacity(err_zero);
-            let mut bhandles = Vec::with_capacity(err_bits);
-
-            for _ in 0..err_rand {
-                let sub_id = id_gen.next().unwrap();
-                rhandles.push(spawn(rand(sub_id, rcontext.clone())));
-            }
-
-            for _ in 0..err_zero {
-                let sub_id = id_gen.next().unwrap();
-                zhandles.push(spawn(zero(sub_id, zcontext.clone())));
-            }
-
-            for _ in 0..err_bits {
-                let sub_id = id_gen.next().unwrap();
-                bhandles.push(spawn(randbit(sub_id, bcontext.clone())));
-            }
-
-            for handle in rhandles {
-                randoms.extend_from_slice(&handle.await.unwrap());
-            }
-
-            for handle in zhandles {
-                zeros.extend_from_slice(&handle.await.unwrap());
-            }
-
-            for handle in bhandles {
-                bits.extend_from_slice(&handle.await.unwrap());
-            }
-
-            let mut handles = Vec::with_capacity(num_instances);
-            for _ in 0..num_instances {
-                let x = bits.pop().unwrap();
-                let y = bits.pop().unwrap();
-                let r = randoms.pop().unwrap();
-                let z = zeros.pop().unwrap();
-                let sub_id = id_gen.next().unwrap();
-                handles.push(spawn(core::mult(sub_id, x, y, r, z, context.clone())));
-            }
-
-            for handle in handles {
-                res.push(handle.await.unwrap());
-            }
-
-            ctr += proto_batch;
-        }
-
-        res
+    let rand_fut = {
+        let num_rand_shares =
+            desc.keys.0 * desc.keys.1 * desc.keys.2 + desc.randoms + 3 * desc.errors;
+        spawn(rand(
+            id_gen.next().unwrap(),
+            num_rand_shares,
+            rcontext,
+            net.clone(),
+        ))
     };
 
-    {
-        let mut ctr = 0;
-        let batches = num_batches(
-            std::cmp::max(num_masks, bits.len()) - bits.len(),
-            bcontext.bin_super_inv.len(),
-        );
-
-        while ctr < batches {
-            let num_instances = std::cmp::min(proto_batch, batches - ctr);
-            let mut handles = Vec::with_capacity(num_instances);
-
-            for _ in 0..num_instances {
-                let sub_id = id_gen.next().unwrap();
-                handles.push(spawn(randbit(sub_id, bcontext.clone())));
-            }
-
-            for handle in handles {
-                bits.extend_from_slice(&handle.await.unwrap());
-            }
-
-            ctr += proto_batch;
-        }
-    }
-
-    {
-        let mut ctr = 0;
-        let batches = num_batches(
-            std::cmp::max(num_keys + num_rand_preproc, randoms.len()) - randoms.len(),
-            context.n - context.t,
-        );
-
-        while ctr < batches {
-            let num_instances = std::cmp::min(proto_batch, batches - ctr);
-            let mut handles = Vec::with_capacity(num_instances);
-
-            for _ in 0..num_instances {
-                let sub_id = id_gen.next().unwrap();
-                handles.push(spawn(rand(sub_id, rcontext.clone())));
-            }
-
-            for handle in handles {
-                randoms.extend_from_slice(&handle.await.unwrap());
-            }
-
-            ctr += proto_batch;
-        }
-    }
-
-    {
-        let mut ctr = 0;
-        let batches = num_batches(
-            std::cmp::max(num_zeros_preproc, zeros.len()) - zeros.len(),
-            context.n - context.t,
-        );
-
-        while ctr < batches {
-            let num_instances = std::cmp::min(proto_batch, batches - ctr);
-            let mut handles = Vec::with_capacity(num_instances);
-
-            for _ in 0..num_instances {
-                let sub_id = id_gen.next().unwrap();
-                handles.push(spawn(zero(sub_id, zcontext.clone())));
-            }
-
-            for handle in handles {
-                zeros.extend_from_slice(&handle.await.unwrap());
-            }
-
-            ctr += proto_batch;
-        }
-    }
-
-    let keys = {
-        let mut keys = [
-            Vec::with_capacity(context.lpn_key_len),
-            Vec::with_capacity(context.lpn_key_len),
-        ];
-
-        for i in 0..2 {
-            for _ in 0..context.lpn_key_len {
-                let mut key = Vec::with_capacity(num_blocks);
-
-                for _ in 0..num_blocks {
-                    key.push(randoms.pop().unwrap());
-                }
-
-                keys[i].push(key);
-            }
-        }
-
-        keys
+    let zero_fut = {
+        let num_zero_shares = desc.zeros + 2 * desc.errors;
+        spawn(zero(
+            id_gen.next().unwrap(),
+            num_zero_shares,
+            zcontext,
+            net.clone(),
+        ))
     };
 
-    let masks = bits.split_off(bits.len() - num_masks);
+    let rbit_fut = {
+        let num_rbit_shares = desc.masks + 2 * desc.errors;
+        spawn(randbit(
+            id_gen.next().unwrap(),
+            num_rbit_shares,
+            bcontext,
+            net.clone(),
+        ))
+    };
+
+    let mut rand_shares = rand_fut.await.unwrap().to_vec();
+    let mut zero_shares = zero_fut.await.unwrap().to_vec();
+    let mut rbit_shares = rbit_fut.await.unwrap().to_vec();
+
+    let mut error_rand =
+        rand_shares.split_off(desc.keys.0 * desc.keys.1 * desc.keys.2 + desc.randoms);
+    let mut error_zeros = zero_shares.split_off(desc.zeros);
+    let mut error_rbits = rbit_shares.split_off(desc.masks);
+
+    let err_id = id_gen.next().unwrap();
+    let error_shares = spawn(async move {
+        let rbit0 = {
+            let mut vals = error_rbits.split_off(desc.errors);
+            vals.truncate(desc.errors);
+            Array1::from_vec(vals)
+        };
+        let rbit1 = Array1::from_vec(error_rbits);
+        let rands = {
+            let mut vals = error_rand.split_off(2 * desc.errors);
+            vals.truncate(desc.errors);
+            Array1::from_vec(vals)
+        };
+        let zeros = {
+            let mut vals = error_zeros.split_off(desc.errors);
+            vals.truncate(desc.errors);
+            Array1::from_vec(vals)
+        };
+
+        let biased_bits = core::mult(
+            err_id.clone(),
+            rbit0,
+            rbit1,
+            rands,
+            zeros,
+            context.clone(),
+            net.clone(),
+        )
+        .await;
+
+        let scalars = Array1::from_vec(error_rand.split_off(desc.errors));
+        let rand = Array1::from_vec(error_rand);
+        let zeros = Array1::from_vec(error_zeros);
+
+        core::mult(err_id, biased_bits, scalars, rand, zeros, context, net).await
+    });
+
+    let key_shares = rand_shares.split_off(desc.randoms);
 
     PreProc {
-        masks,
-        keys,
-        randoms,
-        zeros,
-        errors,
+        masks: Array1::from_vec(rbit_shares),
+        keys: Array3::from_shape_vec(desc.keys, key_shares).unwrap(),
+        randoms: Array1::from_vec(rand_shares),
+        zeros: Array1::from_vec(zero_shares),
+        errors: error_shares.await.unwrap(),
     }
 }

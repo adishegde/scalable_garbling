@@ -1,43 +1,14 @@
 use argh::FromArgs;
-use json;
 use scalable_mpc::circuit::{Circuit, PackedCircuit};
+use scalable_mpc::math::galois::GF;
 use scalable_mpc::protocol::{network, preproc, MPCContext};
-use scalable_mpc::{math, sharing, PartyID};
+use scalable_mpc::{math, sharing, PartyID, Stats};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 
-struct Stats {
-    time: Instant,
-    comm: Vec<(u64, u64)>,
-}
-
-impl Stats {
-    async fn now(stats: &network::Stats, n: u32) -> Self {
-        let mut comm = Vec::with_capacity(n as usize);
-        for i in 0..n {
-            comm.push(stats.party(i.try_into().unwrap()).await);
-        }
-
-        Self {
-            time: Instant::now(),
-            comm,
-        }
-    }
-
-    async fn elapsed(&self, stats: &network::Stats) -> (u64, Vec<(u64, u64)>) {
-        let time: u64 = self.time.elapsed().as_millis().try_into().unwrap();
-        let mut comm = Vec::with_capacity(self.comm.len());
-        for i in 0..self.comm.len() {
-            let pcom = stats.party(i.try_into().unwrap()).await;
-            comm.push((pcom.0 - self.comm[i].0, pcom.1 - self.comm[i].1));
-        }
-
-        (time, comm)
-    }
-}
+const W: u8 = 18;
 
 /// Benchmark garbling phase.
 #[derive(FromArgs)]
@@ -53,10 +24,6 @@ struct PreProc {
     /// file containing circuit description
     #[argh(option)]
     circ: String,
-
-    /// field size in number of bits
-    #[argh(option, default = "18")]
-    gf_width: u8,
 
     /// corruption threshold
     #[argh(option)]
@@ -91,7 +58,7 @@ struct PreProc {
     save: Option<String>,
 
     /// number of threads
-    #[argh(option, default = "8")]
+    #[argh(option, default = "1")]
     threads: usize,
 
     /// number of subprotocols run in parallel
@@ -108,22 +75,26 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: PreProc) {
     println!("Connected to network.");
     std::io::stdout().flush().unwrap();
 
-    let gf = Arc::new(math::galois::GF::new(opts.gf_width).unwrap());
+    GF::<W>::init().unwrap();
+
+    let defpos: Vec<GF<W>> = sharing::PackedSharing::default_pos(n, opts.packing_param);
     let pss = Arc::new(sharing::PackedSharing::new(
+        opts.threshold + opts.packing_param - 1,
         n,
-        opts.threshold,
-        opts.packing_param,
-        gf.as_ref(),
+        &defpos,
     ));
+    let pss_n = Arc::new(sharing::PackedSharing::new(n - 1, n, &defpos));
+
     let bin_supinv_matrix = {
         let path = PathBuf::from(opts.binsup_mat);
-        Arc::new(math::binary_super_inv_matrix(&path, gf.as_ref()))
+        Arc::new(math::binary_super_inv_matrix(&path))
     };
+
     let supinv_matrix = Arc::new(math::super_inv_matrix(
         n as usize,
         (n - opts.threshold) as usize,
-        gf.as_ref(),
     ));
+
     let context = MPCContext {
         id: opts.id,
         n: n as usize,
@@ -132,44 +103,31 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: PreProc) {
         lpn_tau: opts.lpn_error_bias,
         lpn_key_len: opts.lpn_key_len,
         lpn_mssg_len: opts.lpn_mssg_len,
-        gf,
         pss,
-        net_builder: net.clone(),
+        pss_n,
     };
     let rcontext = preproc::RandContext::new(supinv_matrix.clone(), &context);
     let zcontext = preproc::ZeroContext::new(supinv_matrix, &context);
     let bcontext = preproc::RandBitContext::new(bin_supinv_matrix, &context);
 
-    let num_circ_inp_blocks = circ.inputs().len();
-    let (num_and, num_xor, num_inv) = circ.get_gate_counts();
+    let desc = preproc::PreProc::describe(&circ, &context);
 
     let bench_proto = b"benchmark communication protocol".to_vec();
-    let mut chan = net.channel(bench_proto.clone());
     let mut bench_data = json::JsonValue::new_array();
 
     for i in 0..opts.reps {
-        network::sync(bench_proto.clone(), &mut chan, n as usize).await;
+        network::sync(bench_proto.clone(), &net, n as usize).await;
+
         let context = context.clone();
         let rcontext = rcontext.clone();
         let zcontext = zcontext.clone();
         let bcontext = bcontext.clone();
 
         let gproto_id = b"".to_vec();
+        let net = net.clone();
 
         let start = Stats::now(&stats, n).await;
-        preproc::preproc(
-            gproto_id,
-            opts.batch_size,
-            num_circ_inp_blocks,
-            num_and,
-            num_xor,
-            num_inv,
-            context,
-            rcontext,
-            zcontext,
-            bcontext,
-        )
-        .await;
+        preproc::preproc(gproto_id, desc, context, rcontext, zcontext, bcontext, net).await;
         let (runtime, comm) = start.elapsed(&stats).await;
 
         println!();
@@ -192,11 +150,12 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: PreProc) {
     if let Some(save_path) = opts.save {
         let data = bench_data.dump().as_bytes().to_vec();
 
-        chan.send(network::SendMessage {
+        net.send(network::SendMessage {
             to: network::Recipient::One(0),
             proto_id: bench_proto.clone(),
             data,
-        });
+        })
+        .await;
 
         if opts.id == 0 {
             let mut save_data = json::object! {
@@ -205,7 +164,6 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: PreProc) {
                     t: opts.threshold,
                     l: opts.packing_param,
                     circ: opts.circ,
-                    gf_width: opts.gf_width,
                     lpn_tau: opts.lpn_error_bias,
                     lpn_key_len: opts.lpn_key_len,
                     lpn_mssg_len: opts.lpn_mssg_len,
@@ -216,7 +174,7 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: PreProc) {
                 benchmarks: json::JsonValue::new_array()
             };
 
-            network::message_from_each_party(&mut chan, n as usize)
+            network::message_from_each_party(bench_proto.clone(), &net, n as usize)
                 .await
                 .into_iter()
                 .for_each(|data| {
@@ -228,13 +186,14 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: PreProc) {
             let save_path = PathBuf::from(save_path);
             std::fs::write(save_path, save_data.dump()).expect("Can write to save file");
 
-            chan.send(network::SendMessage {
+            net.send(network::SendMessage {
                 to: network::Recipient::All,
                 proto_id: bench_proto,
                 data: b"done".to_vec(),
-            });
+            })
+            .await;
         } else {
-            chan.recv().await;
+            net.recv(bench_proto).await;
         }
     }
 }
@@ -255,8 +214,12 @@ fn main() {
         circ.pack(opts.packing_param)
     };
 
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(opts.threads)
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(opts.threads)
+        .build_global()
+        .unwrap();
+
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()

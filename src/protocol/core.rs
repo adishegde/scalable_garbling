@@ -1,633 +1,376 @@
 use super::network;
-use super::network::{Recipient, SendMessage};
+use super::network::{Network, Recipient, SendMessage};
 use super::{MPCContext, ProtocolID};
-use crate::math::galois::{GFElement, GFMatrix, GF};
-use crate::math::utils;
-use crate::math::Combination;
+use crate::math::{galois::GF, lagrange_coeffs, Combination};
 use crate::sharing::{PackedShare, PackedSharing};
 use crate::PartyID;
+use bincode::{deserialize, serialize};
+use ndarray::parallel::prelude::*;
+use ndarray::{concatenate, s, Array1, Array2, Array3, ArrayView1, Axis, Zip};
 use rand;
 use seahash::hash;
-use std::sync::Arc;
 
-pub async fn reduce_degree(
-    id: ProtocolID,
-    x: PackedShare,
-    random: PackedShare,
-    zero: PackedShare,
-    context: MPCContext,
-) -> PackedShare {
-    // Instead of having the same leader for every instance, we attempt to do some load balancing
-    // by having different parties as leaders.
-    // Computing the leader from the hash of the protocol ID avoids requiring external mechanisms
-    // to synchronize leader assignment across all parties.
-    // The hash need not be cryptographically secure, the only requirement is that it should be
-    // deterministic across all parties.
-    // The better the hash quality the better the load balancing will be.
-    let leader: PartyID = (hash(&id) % (context.n as u64)).try_into().unwrap();
-
-    let mut chan = context.net_builder.channel(id.clone());
-
-    let x_recon = x + random + zero;
-    chan.send(SendMessage {
-        to: Recipient::One(leader),
-        proto_id: id.clone(),
-        data: context.gf.serialize_element(&x_recon),
-    });
-
-    if context.id == leader {
-        let shares: Vec<_> = network::message_from_each_party(&mut chan, context.n)
-            .await
-            .into_iter()
-            .map(|d| context.gf.deserialize_element(&d))
-            .collect();
-
-        let secrets = context.pss.recon_n(&shares, context.gf.as_ref());
-        let shares = {
-            let mut rng = rand::thread_rng();
-            context.pss.share(&secrets, context.gf.as_ref(), &mut rng)
-        };
-
-        for (i, share) in shares.into_iter().enumerate() {
-            chan.send(SendMessage {
-                to: Recipient::One(i as PartyID),
-                proto_id: id.clone(),
-                data: context.gf.serialize_element(&share),
-            });
-        }
-    }
-
-    let share = context.gf.deserialize_element(&chan.recv().await.data);
-    share - random
+// Instead of having the same leader for every instance, we attempt to do some load balancing
+// by having different parties as leaders.
+// Computing the leader from the hash of the protocol ID avoids requiring external mechanisms
+// to synchronize leader assignment across all parties.
+// The hash need not be cryptographically secure, the only requirement is that it should be
+// deterministic across all parties.
+// The better the hash quality the better the load balancing will be.
+fn leader_from_proto_id(id: &ProtocolID, num_parties: usize) -> PartyID {
+    (hash(id) % (num_parties as u64)).try_into().unwrap()
 }
 
-pub async fn batch_reduce_degree(
+pub async fn reduce_degree<const W: u8>(
     id: ProtocolID,
-    x: Vec<PackedShare>,
-    randoms: Vec<PackedShare>,
-    zeros: Vec<PackedShare>,
-    context: MPCContext,
-) -> Vec<PackedShare> {
-    let leader: PartyID = (hash(&id) % (context.n as u64)).try_into().unwrap();
+    vx: Array1<PackedShare<W>>,
+    random: Array1<PackedShare<W>>,
+    zero: Array1<PackedShare<W>>,
+    context: MPCContext<W>,
+    net: Network,
+) -> Array1<PackedShare<W>> {
+    let leader = leader_from_proto_id(&id, context.n);
+    let num = vx.len();
 
-    let mut chan = context.net_builder.channel(id.clone());
-
-    let x_recon: Vec<_> = x
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| v + randoms[i] + zeros[i])
-        .collect();
-    chan.send(SendMessage {
+    let vrecon = Zip::from(&vx)
+        .and(&random)
+        .and(&zero)
+        .par_map_collect(|x, r, z| x + r + z);
+    net.send(SendMessage {
         to: Recipient::One(leader),
         proto_id: id.clone(),
-        data: context.gf.serialize_vec(&x_recon),
-    });
+        data: serialize(vrecon.as_slice().unwrap()).unwrap(),
+    })
+    .await;
 
     if context.id == leader {
-        let shares_list: Vec<_> = network::message_from_each_party(&mut chan, context.n)
+        let shares_n: Vec<GF<W>> = network::message_from_each_party(id.clone(), &net, context.n)
             .await
-            .into_iter()
-            .map(|d| context.gf.deserialize_vec(&d))
+            .into_par_iter()
+            .flat_map(|d| deserialize::<Vec<GF<W>>>(&d).unwrap())
             .collect();
+        let shares_n = Array2::from_shape_vec((context.n, num), shares_n).unwrap();
 
-        let secrets: Vec<_> = (0..x_recon.len())
-            .map(|i| {
-                let shares: Vec<_> = shares_list.iter().map(|s| s[i]).collect();
-                context.pss.recon_n(&shares, context.gf.as_ref())
+        let shares: Vec<_> = shares_n
+            .axis_iter(Axis(1))
+            .into_par_iter()
+            .map_init(rand::thread_rng, |rng, s| {
+                let secrets = context.pss_n.semihon_recon(s);
+                context.pss.share(ArrayView1::from(&secrets), rng)
             })
+            .flatten_iter()
             .collect();
-
-        let shares_list: Vec<_> = {
-            let mut rng = rand::thread_rng();
-            secrets
-                .iter()
-                .map(|s| context.pss.share(s, context.gf.as_ref(), &mut rng))
-                .collect()
-        };
+        let shares = Array2::from_shape_vec((num, context.n), shares).unwrap();
 
         for i in 0..context.n {
-            let shares: Vec<_> = shares_list.iter().map(|s| s[i]).collect();
-
-            chan.send(SendMessage {
+            net.send(SendMessage {
                 to: Recipient::One(i as PartyID),
                 proto_id: id.clone(),
-                data: context.gf.serialize_vec(&shares),
-            });
+                data: serialize(&shares.slice(s![.., i])).unwrap(),
+            })
+            .await;
         }
     }
 
-    let shares = context.gf.deserialize_vec(&chan.recv().await.data);
+    let mut shares: Array1<GF<W>> = deserialize(&net.recv(id).await.data).unwrap();
+    Zip::from(&mut shares).and(&random).par_for_each(|s, r| {
+        *s -= r;
+    });
     shares
-        .into_iter()
-        .zip(randoms.into_iter())
-        .map(|(s, r)| s - r)
-        .collect()
 }
 
-pub async fn mult(
+pub async fn mult<const W: u8>(
     id: ProtocolID,
-    x: PackedShare,
-    y: PackedShare,
-    random: PackedShare,
-    zero: PackedShare,
-    context: MPCContext,
-) -> PackedShare {
-    let product = x * y;
-    reduce_degree(id, product, random, zero, context).await
+    mut vx: Array1<PackedShare<W>>,
+    vy: Array1<PackedShare<W>>,
+    random: Array1<PackedShare<W>>,
+    zero: Array1<PackedShare<W>>,
+    context: MPCContext<W>,
+    net: Network,
+) -> Array1<PackedShare<W>> {
+    Zip::from(&mut vx).and(&vy).par_for_each(|x, y| {
+        *x *= y;
+    });
+    reduce_degree(id, vx, random, zero, context, net).await
 }
 
-pub async fn batch_mult(
-    id: ProtocolID,
-    x: Vec<PackedShare>,
-    y: Vec<PackedShare>,
-    randoms: Vec<PackedShare>,
-    zeros: Vec<PackedShare>,
-    context: MPCContext,
-) -> Vec<PackedShare> {
-    debug_assert_eq!(x.len(), y.len());
-    debug_assert_eq!(y.len(), randoms.len());
-    debug_assert_eq!(randoms.len(), zeros.len());
-
-    let product = x
-        .into_iter()
-        .zip(y.into_iter())
-        .map(|(i, j)| i * j)
-        .collect();
-    batch_reduce_degree(id, product, randoms, zeros, context).await
-}
-
-/// Describes a sharing transformation.
-/// Given a sharing with secrets at a particular position in the underyling polynomial, the
-/// transformed sharing will have the secrets at a different set of positions.
 #[derive(Clone)]
-pub struct SharingTransform {
-    recon_n: Arc<GFMatrix>,
-    share: Arc<GFMatrix>,
-    f: Arc<Combination>,
+pub struct SharingTransform<const W: u8> {
+    recon_n: Array2<GF<W>>,
+    share: Array2<GF<W>>,
+    npos_len: usize,
+    f: Combination,
 }
 
-impl SharingTransform {
+impl<const W: u8> SharingTransform<W> {
     pub fn new(
-        old_pos: &[GFElement],
-        new_pos: &[GFElement],
+        old_pos: &[GF<W>],
+        new_pos: &[GF<W>],
         f: Combination,
-        pss: &PackedSharing,
-        gf: &GF,
+        context: &MPCContext<W>,
     ) -> Self {
+        let n: u32 = context.n.try_into().unwrap();
+        let t: u32 = context.t.try_into().unwrap();
+        let l: u32 = context.l.try_into().unwrap();
+
         Self {
-            recon_n: Arc::new(pss.recon_coeffs_n(old_pos, gf)),
-            share: Arc::new(pss.share_coeffs(new_pos, gf)),
-            f: Arc::new(f),
+            recon_n: PackedSharing::compute_recon_coeffs(n - 1, n, old_pos),
+            share: PackedSharing::compute_share_coeffs(t + l - 1, n, new_pos),
+            npos_len: new_pos.len(),
+            f,
         }
     }
 }
 
-pub async fn trans(
+pub async fn trans<const W: u8>(
     id: ProtocolID,
-    x: PackedShare,
-    random: PackedShare,
-    random_n: PackedShare,
-    transform: SharingTransform,
-    context: MPCContext,
-) -> PackedShare {
-    // Attempt to load balance leader's work across all parties as in the degree reduction
-    // protocol.
-    let leader: PartyID = (hash(&id) % (context.n as u64)).try_into().unwrap();
-    let mut chan = context.net_builder.channel(id.clone());
+    vx: Array1<PackedShare<W>>,
+    random: Array1<PackedShare<W>>,
+    mut random_n: Array1<PackedShare<W>>,
+    transform: SharingTransform<W>,
+    context: MPCContext<W>,
+    net: Network,
+) -> Array1<PackedShare<W>> {
+    let leader = leader_from_proto_id(&id, context.n);
+    let num = vx.len();
 
-    let x_recon = x + random_n;
-    chan.send(SendMessage {
-        to: Recipient::One(leader),
-        proto_id: id.clone(),
-        data: context.gf.serialize_element(&x_recon),
+    Zip::from(&mut random_n).and(&vx).par_for_each(|r, x| {
+        *r += x;
     });
 
-    if context.id == leader {
-        let shares: Vec<_> = network::message_from_each_party(&mut chan, context.n)
-            .await
-            .into_iter()
-            .map(|d| context.gf.deserialize_element(&d))
-            .collect();
-
-        let secrets: Vec<_> =
-            utils::matrix_vector_prod(&transform.recon_n, &shares, context.gf.as_ref()).collect();
-        let secrets = transform.f.apply(&secrets);
-        let shares = {
-            let mut rng = rand::thread_rng();
-            context.pss.share_using_coeffs(
-                secrets,
-                transform.share.as_ref(),
-                context.gf.as_ref(),
-                &mut rng,
-            )
-        };
-
-        for (i, share) in shares.into_iter().enumerate() {
-            chan.send(SendMessage {
-                to: Recipient::One(i as PartyID),
-                proto_id: id.clone(),
-                data: context.gf.serialize_element(&share),
-            });
-        }
-    }
-
-    let share = context.gf.deserialize_element(&chan.recv().await.data);
-    share - random
-}
-
-pub async fn batch_trans(
-    id: ProtocolID,
-    x: Vec<PackedShare>,
-    randoms: Vec<PackedShare>,
-    randoms_n: Vec<PackedShare>,
-    transform: SharingTransform,
-    context: MPCContext,
-) -> Vec<PackedShare> {
-    let leader: PartyID = (hash(&id) % (context.n as u64)).try_into().unwrap();
-    let mut chan = context.net_builder.channel(id.clone());
-
-    debug_assert_eq!(x.len(), randoms.len());
-    debug_assert_eq!(x.len(), randoms_n.len());
-
-    let x_recon: Vec<_> = x
-        .iter()
-        .zip(randoms_n.iter())
-        .map(|(&v, &r)| v + r)
-        .collect();
-
-    chan.send(SendMessage {
+    net.send(SendMessage {
         to: Recipient::One(leader),
         proto_id: id.clone(),
-        data: context.gf.serialize_vec(&x_recon),
-    });
+        data: serialize(random_n.as_slice().unwrap()).unwrap(),
+    })
+    .await;
 
     if context.id == leader {
-        let shares_list: Vec<_> = network::message_from_each_party(&mut chan, context.n)
+        let shares_n: Vec<_> = network::message_from_each_party(id.clone(), &net, context.n)
             .await
-            .into_iter()
-            .map(|d| context.gf.deserialize_vec(&d))
+            .into_par_iter()
+            .flat_map(|d| deserialize::<Vec<GF<W>>>(&d).unwrap())
             .collect();
+        let shares_n = Array2::from_shape_vec((context.n, num), shares_n).unwrap();
 
-        let secrets: Vec<_> = (0..x_recon.len())
-            .map(|i| {
-                let shares: Vec<_> = shares_list.iter().map(|s| s[i]).collect();
-                let secrets: Vec<_> =
-                    utils::matrix_vector_prod(&transform.recon_n, &shares, context.gf.as_ref())
-                        .collect();
-                transform.f.apply(&secrets)
+        let secrets = transform.recon_n.dot(&shares_n);
+
+        let shares = secrets
+            .axis_iter(Axis(1))
+            .into_par_iter()
+            .map_init(rand::thread_rng, |rng, c| {
+                let tf_secrets = transform.f.apply(c);
+                PackedSharing::share_using_coeffs(
+                    ArrayView1::from(&tf_secrets),
+                    transform.share.view(),
+                    transform.npos_len.try_into().unwrap(),
+                    rng,
+                )
             })
+            .flatten_iter()
             .collect();
-
-        let shares_list: Vec<_> = {
-            let mut rng = rand::thread_rng();
-            secrets
-                .into_iter()
-                .map(|s| {
-                    context.pss.share_using_coeffs(
-                        s,
-                        transform.share.as_ref(),
-                        context.gf.as_ref(),
-                        &mut rng,
-                    )
-                })
-                .collect()
-        };
+        let shares = Array2::from_shape_vec((num, context.n), shares).unwrap();
 
         for i in 0..context.n {
-            let shares: Vec<_> = shares_list.iter().map(|s| s[i]).collect();
-
-            chan.send(SendMessage {
+            net.send(SendMessage {
                 to: Recipient::One(i as PartyID),
                 proto_id: id.clone(),
-                data: context.gf.serialize_vec(&shares),
-            });
+                data: serialize(&shares.slice(s![.., i])).unwrap(),
+            })
+            .await;
         }
     }
 
-    let shares = context.gf.deserialize_vec(&chan.recv().await.data);
+    let mut shares: Array1<GF<W>> = deserialize(&net.recv(id).await.data).unwrap();
+    Zip::from(&mut shares).and(&random).par_for_each(|s, r| {
+        *s -= r;
+    });
     shares
-        .into_iter()
-        .zip(randoms.into_iter())
-        .map(|(s, r)| s - r)
-        .collect()
 }
 
 #[derive(Clone)]
-pub struct RandSharingTransform {
-    share: Arc<GFMatrix>,
-    share_n: Arc<GFMatrix>,
+pub struct RandSharingTransform<const W: u8> {
+    share: Array2<GF<W>>,
+    share_n: Array2<GF<W>>,
 }
 
-impl RandSharingTransform {
+impl<const W: u8> RandSharingTransform<W> {
     pub fn new(
-        id: PartyID,
-        old_pos: &[Vec<GFElement>],
-        new_pos: &[Vec<GFElement>],
+        old_pos: &[Vec<GF<W>>],
+        new_pos: &[Vec<GF<W>>],
         f_trans: &[Combination],
-        pss: &PackedSharing,
-        gf: &GF,
+        context: &MPCContext<W>,
     ) -> Self {
-        let n: usize = pss.num_parties() as usize;
-        let t: usize = pss.threshold() as usize;
-        let l: usize = pss.packing_param() as usize;
-
         debug_assert_eq!(old_pos.len(), new_pos.len());
         debug_assert_eq!(new_pos.len(), f_trans.len());
-        debug_assert!(f_trans.len() <= l);
+        debug_assert!(f_trans.len() <= context.l);
 
-        let mut coeffs_list = Vec::with_capacity(l);
-        let mut coeffs_list_n = Vec::with_capacity(l);
+        let share_coeffs = |d: usize, n: usize, pos: &[GF<W>]| -> Array2<GF<W>> {
+            let np = d + 1;
+            let sh_pos = PackedSharing::share_pos(n.try_into().unwrap());
+            let all_pos: Vec<_> = pos.iter().chain(sh_pos.iter()).cloned().collect();
+            lagrange_coeffs(&all_pos[..np], &sh_pos)
+        };
+
+        let mut acc_coeffs = Array3::zeros((0, context.n, context.t + context.l));
+        let mut acc_coeffs_n = Array3::zeros((0, context.n, context.n));
 
         // Compute coefficients to interpolate polynomials to old_pos and new_pos.
         for ((opos, npos), trans) in old_pos.iter().zip(new_pos.iter()).zip(f_trans.iter()) {
-            debug_assert!(opos.len() <= l);
-            debug_assert!(npos.len() <= l);
+            debug_assert!(opos.len() <= context.l);
+            debug_assert!(npos.len() <= context.l);
+            debug_assert_eq!(trans.len(), npos.len());
 
-            // If opos.len() is not l, then in each row insert 0 for positions corresponding to the
-            // missing positions.
-            let coeffs_n: GFMatrix = pss
-                .share_coeffs_n(opos, gf)
-                .into_iter()
-                .map(|r| {
-                    if opos.len() != l {
-                        r[..opos.len()]
-                            .iter()
-                            .cloned()
-                            .chain(std::iter::repeat(gf.zero()))
-                            .take(l)
-                            .chain(r[opos.len()..].iter().cloned())
-                            .collect()
-                    } else {
-                        r
-                    }
-                })
-                .collect();
-            coeffs_list_n.push(coeffs_n);
+            let coeffs_n = share_coeffs(context.n - 1, context.n, opos);
+            acc_coeffs_n.push(Axis(0), coeffs_n.view()).unwrap();
 
-            // If npos.len() is not l, then in each row insert 0 for positions corresponding to the
-            // missing positions.
-            let coeffs: GFMatrix = pss
-                .share_coeffs(npos, gf)
-                .into_iter()
-                .map(|r| {
-                    if npos.len() != l {
-                        r[..npos.len()]
-                            .iter()
-                            .cloned()
-                            .chain(std::iter::repeat(gf.zero()))
-                            .take(l)
-                            .chain(r[npos.len()..].iter().cloned())
-                            .collect()
-                    } else {
-                        r
-                    }
-                })
-                .collect();
+            let coeffs = share_coeffs(context.t + context.l - 1, context.n, npos);
+            let trans_mat = {
+                let v: Vec<_> = (0..(context.t + context.l)).collect();
+                let mut map = trans.apply(ArrayView1::from(&v[..opos.len()]));
+                map.extend_from_slice(&v[npos.len()..]);
 
-            // The matrix to compute the shares should also incorporate the underlying
-            // transformation on the secrets.
-            // We first compute the coefficient matrix, then multiply it with the matrix
-            // corresponding to the linear transformation.
-            let mut coeffs_trans = coeffs.clone();
-
-            let mut inp = vec![gf.zero(); l];
-            for c in 0..l {
-                // inp should correspond to the c-th unit vector to capture the c-th secret's
-                // contribution to the transformed secret.
-                inp[c] = gf.one();
-                if c != 0 {
-                    inp[c - 1] = gf.zero();
-                }
-
-                debug_assert_eq!(trans.apply(&inp).len(), npos.len());
-
-                // Multiply npos.len() width left submatrix of the coefficient matrix with the
-                // c-th column of the linear transformation matrix.
-                // The c-th column of the coefficient is then replaced with the product.
-                for (r, v) in utils::matrix_vector_prod(&coeffs, &trans.apply(&inp), gf).enumerate()
-                {
-                    coeffs_trans[r][c] = v;
-                }
-            }
-
-            coeffs_list.push(coeffs_trans);
+                let ext_trans = Combination::new(map);
+                let mut mat: Array2<GF<W>> = Array2::eye(context.t + context.l);
+                mat.columns_mut().into_iter().for_each(|col| {
+                    let tcol = ext_trans.apply(col.view());
+                    Zip::from(col).and(&tcol).for_each(|c, &tc| {
+                        *c = tc;
+                    });
+                });
+                mat
+            };
+            acc_coeffs
+                .push(Axis(0), coeffs.dot(&trans_mat).view())
+                .unwrap();
         }
 
+        let share_l = share_coeffs(
+            context.l,
+            context.n,
+            &PackedSharing::default_pos(
+                context.n.try_into().unwrap(),
+                context.l.try_into().unwrap(),
+            ),
+        )
+        .slice(s![context.id as usize, ..])
+        .to_owned();
+
         // Encode the coefficients as a share (i.e., as the points over a polynomial).
-
         let share = {
-            let num_rows = n - t;
-            let num_cols = t + l;
+            let num = acc_coeffs.shape()[0];
+            let f = |(r, c)| {
+                share_l
+                    .slice(s![..num])
+                    .dot(&acc_coeffs.slice(s![.., r, c]).view())
+            };
 
-            let mut coeff_shares = Vec::with_capacity(num_rows);
-            for r in 0..num_rows {
-                let mut row_shares = Vec::with_capacity(num_cols);
-
-                for c in 0..num_cols {
-                    let mut vals = Vec::with_capacity(l);
-                    for coeffs in coeffs_list.iter() {
-                        vals.push(coeffs[r][c]);
-                    }
-                    // Only vectors of length l can be encoded.
-                    // If fewer than l transformations are specified then the remaining are just
-                    // zeroed out.
-                    vals.resize(l, gf.zero());
-
-                    row_shares.push(pss.const_to_share(&vals, id, gf));
-                }
-                coeff_shares.push(row_shares);
-            }
-
-            coeff_shares
+            Array2::from_shape_fn((context.n, context.t + context.l), f)
         };
 
         let share_n = {
-            let num_rows = l;
-            let num_cols = n;
+            let num = acc_coeffs_n.shape()[0];
+            let f = |(r, c)| {
+                share_l
+                    .slice(s![..num])
+                    .dot(&acc_coeffs_n.slice(s![.., r, c]).view())
+            };
 
-            let mut coeff_shares = Vec::with_capacity(num_rows);
-            for r in 0..num_rows {
-                let mut row_shares = Vec::with_capacity(num_cols);
-
-                for c in 0..num_cols {
-                    let mut vals = Vec::with_capacity(l);
-                    for coeffs in coeffs_list_n.iter() {
-                        vals.push(coeffs[r][c]);
-                    }
-                    // Only vectors of length l can be encoded.
-                    // If fewer than l transformations are specified then the remaining are just
-                    // zeroed out.
-                    vals.resize(l, gf.zero());
-
-                    row_shares.push(pss.const_to_share(&vals, id, gf));
-                }
-                coeff_shares.push(row_shares);
-            }
-
-            coeff_shares
+            Array2::from_shape_fn((context.n, context.n), f)
         };
 
-        let share = Arc::new(share);
-        let share_n = Arc::new(share_n);
+        let share = share;
+        let share_n = share_n;
 
         Self { share, share_n }
     }
 }
 
-pub fn randtrans_comp(
-    randoms: &[GFElement],
-    zeros: &[GFElement],
-    transform: &RandSharingTransform,
-    context: &MPCContext,
-) -> (Vec<PackedShare>, Vec<PackedShare>) {
-    let secrets = &randoms[..context.l];
-    let randtape = &randoms[context.n..(context.n + context.t)];
-    let zeros_n = &zeros[..context.n];
-    let zeros = &zeros[context.n..];
-
-    let shares_n: Vec<_> = {
-        let points = &randoms[..context.n];
-        let mut shares = randoms[context.l..context.n].to_vec();
-        shares.extend(utils::matrix_vector_prod(
-            &transform.share_n,
-            points,
-            context.gf.as_ref(),
-        ));
-        shares
-            .into_iter()
-            .zip(zeros_n.iter())
-            .map(|(v, z)| v + *z)
-            .collect()
-    };
-
-    let shares: Vec<_> = {
-        let points: Vec<_> = secrets.iter().chain(randtape.iter()).copied().collect();
-        let mut shares = randtape.to_vec();
-        shares.extend(utils::matrix_vector_prod(
-            &transform.share,
-            &points,
-            context.gf.as_ref(),
-        ));
-        shares
-            .into_iter()
-            .zip(zeros.iter())
-            .map(|(v, z)| v + *z)
-            .collect()
-    };
-
-    (shares, shares_n)
-}
-
-pub async fn randtrans(
+pub async fn randtrans<const W: u8>(
     id: ProtocolID,
-    randoms: Vec<GFElement>,
-    zeros: Vec<GFElement>,
-    transform: RandSharingTransform,
-    context: MPCContext,
-) -> Vec<(PackedShare, PackedShare)> {
-    debug_assert_eq!(randoms.len(), context.n + context.t);
-    debug_assert_eq!(zeros.len(), 2 * context.n);
+    mut randoms: Vec<GF<W>>,
+    mut zeros: Vec<GF<W>>,
+    transform: Vec<RandSharingTransform<W>>,
+    context: MPCContext<W>,
+    net: Network,
+) -> (Array2<GF<W>>, Array2<GF<W>>) {
+    let num = transform.len();
 
-    let mut chan = context.net_builder.channel(id.clone());
+    debug_assert_eq!(randoms.len(), num * (context.n + context.t));
+    debug_assert_eq!(zeros.len(), 2 * context.n * num);
 
-    let (shares, shares_n) = randtrans_comp(&randoms, &zeros, &transform, &context);
+    let secrets = Array2::from_shape_vec(
+        (context.l, num),
+        randoms.split_off(randoms.len() - num * context.l),
+    )
+    .unwrap();
+    let secrets_n = secrets.clone();
 
-    for (i, (share, share_n)) in shares.into_iter().zip(shares_n.into_iter()).enumerate() {
-        chan.send(SendMessage {
+    let rands = Array2::from_shape_vec(
+        (context.t, num),
+        randoms.split_off(randoms.len() - num * context.t),
+    )
+    .unwrap();
+    let rands_n = Array2::from_shape_vec((context.n - context.l, num), randoms).unwrap();
+
+    let points = concatenate![Axis(0), secrets, rands];
+    let points_n = concatenate![Axis(0), secrets_n, rands_n];
+
+    let zeros_n =
+        Array2::from_shape_vec((context.n, num), zeros.split_off(context.n * num)).unwrap();
+    let zeros = Array2::from_shape_vec((context.n, num), zeros).unwrap();
+
+    let shares: Vec<_> = transform
+        .par_iter()
+        .enumerate()
+        .flat_map_iter(|(i, trans)| {
+            (trans.share.dot(&points.slice(s![.., i])) + zeros.slice(s![.., i])).to_vec()
+        })
+        .collect();
+    let shares = Array2::from_shape_vec((num, context.n), shares).unwrap();
+
+    let shares_n: Vec<_> = transform
+        .par_iter()
+        .enumerate()
+        .flat_map_iter(|(i, trans)| {
+            (trans.share_n.dot(&points_n.slice(s![.., i])) + zeros_n.slice(s![.., i])).to_vec()
+        })
+        .collect();
+    let shares_n = Array2::from_shape_vec((num, context.n), shares_n).unwrap();
+
+    for i in 0..context.n {
+        net.send(SendMessage {
             to: Recipient::One(i as PartyID),
             proto_id: id.clone(),
-            data: context.gf.serialize_vec(&[share, share_n]),
-        });
+            data: serialize(&(&shares.slice(s![.., i]), &shares_n.slice(s![.., i]))).unwrap(),
+        })
+        .await;
     }
 
     let (shares, shares_n): (Vec<_>, Vec<_>) =
-        network::message_from_each_party(&mut chan, context.n)
+        network::message_from_each_party(id, &net, context.n)
             .await
-            .into_iter()
+            .into_par_iter()
             .map(|d| {
-                let vals = context.gf.deserialize_vec(&d);
-                (vals[0], vals[1])
+                let (shares, shares_n): (Array1<GF<W>>, Array1<GF<W>>) = deserialize(&d).unwrap();
+                (shares, shares_n)
             })
             .unzip();
 
-    context
-        .pss
-        .recon_n(&shares, context.gf.as_ref())
-        .into_iter()
-        .zip(
-            context
-                .pss
-                .recon_n(&shares_n, context.gf.as_ref())
-                .into_iter(),
-        )
-        .collect()
-}
-
-pub async fn batch_randtrans(
-    id: ProtocolID,
-    randoms: Vec<GFElement>,
-    zeros: Vec<GFElement>,
-    transform: RandSharingTransform,
-    context: MPCContext,
-) -> Vec<Vec<(PackedShare, PackedShare)>> {
-    let batch_size = randoms.len() / (context.n + context.t);
-    let rands_per_batch = context.n + context.t;
-    let zeros_per_batch = 2 * context.n;
-    debug_assert_eq!(randoms.len(), batch_size * rands_per_batch);
-    debug_assert_eq!(zeros.len(), batch_size * zeros_per_batch);
-
-    let mut chan = context.net_builder.channel(id.clone());
-
-    let mut shares_list: Vec<_> = (0..context.n)
-        .map(|_| Vec::with_capacity(context.n))
+    let shares = shares
+        .into_par_iter()
+        .flat_map_iter(|s| s.to_vec())
         .collect();
-    for i in 0..batch_size {
-        let (shares, shares_n) = randtrans_comp(
-            &randoms[(i * rands_per_batch)..((i + 1) * rands_per_batch)],
-            &zeros[(i * zeros_per_batch)..((i + 1) * zeros_per_batch)],
-            &transform,
-            &context,
-        );
-        for i in 0..context.n {
-            shares_list[i].push(shares[i]);
-            shares_list[i].push(shares_n[i]);
-        }
-    }
-
-    for (i, shares) in shares_list.into_iter().enumerate() {
-        chan.send(SendMessage {
-            to: Recipient::One(i as PartyID),
-            proto_id: id.clone(),
-            data: context.gf.serialize_vec(&shares),
-        });
-    }
-
-    let shares_list: Vec<_> = network::message_from_each_party(&mut chan, context.n)
-        .await
-        .into_iter()
-        .map(|d| context.gf.deserialize_vec(&d))
+    let shares = Array2::from_shape_vec((context.n, num), shares).unwrap();
+    let shares_n = shares_n
+        .into_par_iter()
+        .flat_map_iter(|s| s.to_vec())
         .collect();
+    let shares_n = Array2::from_shape_vec((context.n, num), shares_n).unwrap();
 
-    let mut res: Vec<_> = (0..context.l)
-        .map(|_| Vec::with_capacity(batch_size))
-        .collect();
-    for i in 0..batch_size {
-        let shares: Vec<_> = shares_list.iter().map(|shares| shares[2 * i]).collect();
-        let shares_n: Vec<_> = shares_list.iter().map(|shares| shares[2 * i + 1]).collect();
+    let shares = context.pss_n.recon_coeffs().dot(&shares).reversed_axes();
+    let shares_n = context.pss_n.recon_coeffs().dot(&shares_n).reversed_axes();
 
-        context
-            .pss
-            .recon_n(&shares, context.gf.as_ref())
-            .into_iter()
-            .zip(
-                context
-                    .pss
-                    .recon_n(&shares_n, context.gf.as_ref())
-                    .into_iter(),
-            )
-            .enumerate()
-            .for_each(|(i, trans_share)| res[i].push(trans_share));
-    }
-
-    res
+    // Output shapes are (num, l).
+    (shares, shares_n)
 }

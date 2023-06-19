@@ -1,219 +1,175 @@
+use ndarray::{Array, ArrayView1, Zip};
+use num_traits::{One, Zero};
 use scalable_mpc::math;
-use scalable_mpc::math::galois::{GFElement, GF};
-use scalable_mpc::math::lagrange_coeffs;
-use serial_test::serial;
+use scalable_mpc::math::{galois::GF, Combination};
 use std::path::PathBuf;
-use std::thread;
 
-const GF_WIDTH: u8 = 18;
-
-// Creating a from field is not thread safe and so the tests can't be run in parallel.
-fn setup() -> GF {
-    GF::new(GF_WIDTH).unwrap()
-}
+const W: u8 = 18;
 
 #[test]
-#[serial]
 fn add() {
-    let gf = setup();
-    let a = gf.get(5);
-    let b = gf.get(3);
-    let c = a + b;
+    GF::<W>::init().unwrap();
 
-    assert_eq!(c, gf.get(6));
+    let a = GF::from(5u32);
+    let b = GF::from(3u32);
+    let c = GF::<W>::from(6u32);
+
+    assert_eq!(a + b, c);
+    assert_eq!(&a + b, c);
+    assert_eq!(&a + &b, c);
+    assert_eq!(a + &b, c);
 }
 
 #[test]
-#[serial]
 fn add_assign() {
-    let gf = setup();
-    let mut a = gf.get(5);
-    let b = gf.get(3);
+    GF::<W>::init().unwrap();
+    let mut a = GF::from(5u32);
+    let b = GF::from(3u32);
+    let c = GF::<W>::from(6u32);
+
     a += b;
+    assert_eq!(a, c);
 
-    assert_eq!(a, gf.get(6));
+    let mut a = GF::from(5u32);
+    a += &b;
+    assert_eq!(a, c);
 }
 
 #[test]
-#[serial]
 fn mul() {
-    let gf = setup();
-    let a = gf.get(7);
-    let b = gf.get(9);
-    let c = a * b;
+    GF::<W>::init().unwrap();
 
-    assert_eq!(c, gf.get(63));
+    let a = GF::from(7u32);
+    let b = GF::from(9u32);
+    let c = GF::<W>::from(63u32);
+
+    assert_eq!(a * b, c);
+    assert_eq!(&a * b, c);
+    assert_eq!(&a * &b, c);
+    assert_eq!(a * &b, c);
 }
 
 #[test]
-#[serial]
 fn mul_assign() {
-    let gf = setup();
-    let mut a = gf.get(7);
-    let b = gf.get(9);
+    GF::<W>::init().unwrap();
+    let mut a = GF::from(7u32);
+    let b = GF::from(9u32);
+    let c = GF::<W>::from(63u32);
+
     a *= b;
+    assert_eq!(a, c);
 
-    assert_eq!(a, gf.get(63));
+    let mut a = GF::from(7u32);
+    a *= &b;
+    assert_eq!(a, c);
 }
 
 #[test]
-#[serial]
 fn div() {
-    let gf = setup();
-    let a = gf.get(63);
-    let b = gf.get(7);
-    let c = a / b;
+    GF::<W>::init().unwrap();
 
-    assert_eq!(c, gf.get(9));
+    let a = GF::from(63u32);
+    let b = GF::from(7u32);
+    let c = GF::<W>::from(9u32);
+
+    assert_eq!(a / b, c);
+    assert_eq!(&a / b, c);
+    assert_eq!(&a / &b, c);
+    assert_eq!(a / &b, c);
 }
 
 #[test]
-#[serial]
 fn div_assign() {
-    let gf = setup();
-    let mut a = gf.get(63);
-    let b = gf.get(7);
+    GF::<W>::init().unwrap();
+    let mut a = GF::from(63u32);
+    let b = GF::from(7u32);
+    let c = GF::<W>::from(9u32);
+
     a /= b;
+    assert_eq!(a, c);
 
-    assert_eq!(a, gf.get(9));
+    let mut a = GF::from(63u32);
+    a /= &b;
+    assert_eq!(a, c);
 }
 
 #[test]
-#[serial]
-fn get_range() {
-    let gf = setup();
-    let vals = gf.get_range(0..10);
-
-    for (i, v) in vals.enumerate() {
-        assert_eq!(gf.get(i.try_into().unwrap()), v);
-    }
-}
-
-#[test]
-#[serial]
-fn ops_in_parallel() {
-    let gf = setup();
-    let one = gf.one();
-
-    let prod = thread::scope(|s| {
-        let h1 = s.spawn(|| {
-            let beg = 1;
-            let end = gf.order() / 2;
-            (beg..end).fold(one, |acc, x| acc * gf.get(x))
-        });
-
-        let h2 = s.spawn(|| {
-            let beg = gf.order() / 2;
-            let end = gf.order();
-            (beg..end).fold(one, |acc, x| acc * gf.get(x))
-        });
-
-        h1.join().unwrap() * h2.join().unwrap()
-    });
-
-    let exp = (1..2_u32.pow(GF_WIDTH as u32)).fold(one, |acc, x| acc * gf.get(x));
-    assert_eq!(prod, exp);
-}
-
-#[test]
-#[serial]
-fn serialize_and_deserialize_element() {
-    let gf = setup();
-    let a = gf.get(53);
-    let bytes = gf.serialize_element(&a);
-    let b = gf.deserialize_element(&bytes);
-
-    assert_eq!(bytes.len(), 3);
-    assert_eq!(a, b);
-}
-
-#[test]
-#[serial]
-fn serialize_and_deserialize_vec() {
-    let gf = setup();
-    let a = vec![gf.get(53), gf.get(133), gf.get(23)];
-    let bytes = gf.serialize_vec(&a);
-    let b = gf.deserialize_vec(&bytes);
-
-    assert_eq!(bytes.len(), 9);
-    assert_eq!(a, b);
-}
-
-#[test]
-#[serial]
 fn lagrange_coeffs_on_same_evaluations() {
-    let gf = setup();
+    GF::<W>::init().unwrap();
 
-    let pos: Vec<GFElement> = vec![37, 71, 97].iter().map(|&x| gf.get(x)).collect();
-    let all_coeffs = lagrange_coeffs(&pos, &pos, &gf);
-
-    assert_eq!(all_coeffs.len(), pos.len());
-    for coeffs in &all_coeffs {
-        assert_eq!(coeffs.len(), pos.len());
-    }
-
-    let gf_one = gf.one();
-    let gf_zero = gf.zero();
-
-    for (i, coeffs) in all_coeffs.iter().enumerate() {
-        for (j, &v) in coeffs.iter().enumerate() {
-            if i == j {
-                assert_eq!(v, gf_one);
-            } else {
-                assert_eq!(v, gf_zero);
-            }
-        }
-    }
-}
-
-#[test]
-#[serial]
-fn lagrange_coeffs_on_diff_evaluations() {
-    let gf = setup();
-    let poly = |x: GFElement| gf.get(5) * x * x + gf.get(2) * x + gf.get(7);
-
-    let pos: Vec<GFElement> = vec![37, 71, 97].iter().map(|&x| gf.get(x)).collect();
-    let evals: Vec<GFElement> = pos.iter().map(|&x| poly(x)).collect();
-
-    let npos: Vec<GFElement> = vec![71, 4].iter().map(|&x| gf.get(x)).collect();
-    let exp: Vec<GFElement> = vec![evals[1], gf.get(95)];
-
-    let all_coeffs = lagrange_coeffs(&pos, &npos, &gf);
-
-    assert_eq!(all_coeffs.len(), npos.len());
-    for coeffs in &all_coeffs {
-        assert_eq!(coeffs.len(), pos.len());
-    }
-
-    let out: Vec<GFElement> = all_coeffs
-        .iter()
-        .map(|coeffs| {
-            coeffs
-                .iter()
-                .zip(evals.iter())
-                .fold(gf.get(0), |acc, (&x, &y)| acc + (x * y))
-        })
+    let pos: Vec<GF<W>> = vec![37u32, 71u32, 97u32]
+        .into_iter()
+        .map(GF::from)
         .collect();
+    let all_coeffs = math::lagrange_coeffs(&pos, &pos);
 
-    println!(" exp: {:?}\n out: {:?}", exp, out);
-
-    for (&e, &o) in exp.iter().zip(out.iter()) {
-        assert_eq!(e, o);
-    }
+    assert_eq!(all_coeffs.shape(), &[pos.len(), pos.len()]);
+    assert_eq!(all_coeffs, Array::eye(pos.len()));
 }
 
 #[test]
-#[serial]
+fn lagrange_coeffs_on_diff_evaluations() {
+    GF::<W>::init().unwrap();
+
+    let poly = |x| GF::from(5u32) * x * x + GF::from(2u32) * x + GF::from(7u32);
+
+    let pos: Vec<GF<W>> = vec![37u32, 71u32, 97u32]
+        .into_iter()
+        .map(GF::from)
+        .collect();
+    let evals = Array::from_vec(pos.iter().map(poly).collect());
+
+    let npos: Vec<GF<W>> = vec![71u32, 4u32].into_iter().map(GF::from).collect();
+    let exp = Array::from_vec(npos.iter().map(poly).collect());
+
+    let coeffs = math::lagrange_coeffs(&pos, &npos);
+
+    assert_eq!(coeffs.shape(), &[npos.len(), pos.len()]);
+
+    let out = coeffs.dot(&evals);
+
+    assert_eq!(exp, out);
+}
+
+#[test]
 fn binary_super_inv_matrix() {
-    let gf = setup();
+    GF::<W>::init().unwrap();
+
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("tests/data/n16_t5.txt");
 
-    let matrix = math::binary_super_inv_matrix(&path, &gf);
+    let matrix = math::binary_super_inv_matrix::<W>(&path);
 
-    for row in matrix {
-        for val in row {
-            assert!((val == gf.zero()) || (val == gf.one()));
-        }
-    }
+    Zip::from(&matrix).for_each(|x| {
+        assert!(x.is_zero() || x.is_one());
+    });
+}
+
+#[test]
+fn super_invertible_matrix() {
+    GF::<W>::init().unwrap();
+    let mat = math::super_inv_matrix::<W>(10, 7);
+    assert_eq!(mat.shape(), &[7, 10]);
+}
+
+#[test]
+fn reed_solomon_generator_matrix() {
+    GF::<W>::init().unwrap();
+    let mat = math::rs_gen_mat::<W>(12, 40);
+    assert_eq!(mat.shape(), &[40, 12]);
+}
+
+#[test]
+fn combination() {
+    let comb = {
+        let inp: [u32; 3] = [101, 3, 23];
+        let out: [u32; 5] = [23, 3, 101, 3, 23];
+        Combination::from_instance(&inp, &out)
+    };
+
+    let inp = [-2, 99, 1];
+    let exp = [1, 99, -2, 99, 1];
+    let out = comb.apply(ArrayView1::from(&inp));
+
+    assert_eq!(out, exp);
 }
