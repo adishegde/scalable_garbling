@@ -24,3 +24,10 @@ seahash = "4.1.0"
 serde = { version = "1.0.163", features = ["derive"] }
 tokio = { version = "1.28.2", features = ["full"] }
 vint64 = "1.0.1"
+
+[[bench]]
+name = "field_ops"
+harness = false
+
+[dev-dependencies]
+criterion = "0.5.1"
