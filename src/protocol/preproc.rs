@@ -9,6 +9,7 @@ use crate::PartyID;
 use bincode::{deserialize, serialize};
 use ndarray::{parallel::prelude::*, s, Array1, Array2, Array3, ArrayView1};
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::task::spawn;
@@ -196,7 +197,7 @@ pub async fn randbit<const W: u8>(
         .unwrap()
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PreProc<const W: u8> {
     // Mask for each packed gate
     pub masks: Array1<PackedShare<W>>,
@@ -209,11 +210,11 @@ pub struct PreProc<const W: u8> {
 
 #[derive(Clone, Copy)]
 pub struct PreProcCount {
-    masks: usize,
-    keys: (usize, usize, usize),
-    randoms: usize,
-    zeros: usize,
-    errors: usize,
+    pub masks: usize,
+    pub keys: (usize, usize, usize),
+    pub randoms: usize,
+    pub zeros: usize,
+    pub errors: usize,
 }
 
 impl PreProcCount {

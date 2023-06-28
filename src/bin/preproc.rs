@@ -60,10 +60,6 @@ struct PreProc {
     /// number of threads
     #[argh(option, default = "1")]
     threads: usize,
-
-    /// number of subprotocols run in parallel
-    #[argh(option, default = "10000")]
-    batch_size: usize,
 }
 
 async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: PreProc) {
@@ -168,8 +164,7 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: PreProc) {
                     lpn_key_len: opts.lpn_key_len,
                     lpn_mssg_len: opts.lpn_mssg_len,
                     reps: opts.reps,
-                    threads: opts.reps,
-                    batch_size: opts.batch_size,
+                    threads: opts.reps
                 },
                 benchmarks: json::JsonValue::new_array()
             };
