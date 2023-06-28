@@ -104,6 +104,7 @@ async fn reduce_degree() {
             vx.slice(s![.., i]).to_owned(),
             rand_shares.slice(s![.., i]).to_owned(),
             zero_shares.slice(s![.., i]).to_owned(),
+            None,
             context,
             net,
         )));
@@ -155,6 +156,7 @@ async fn mult() {
             vy.slice(s![.., i]).to_owned(),
             rand_shares.slice(s![.., i]).to_owned(),
             zero_shares.slice(s![.., i]).to_owned(),
+            None,
             context,
             net,
         )));
@@ -324,9 +326,9 @@ async fn preproc() {
 
         assert_eq!(preproc.masks.shape(), dummy_preproc.masks.shape());
         assert_eq!(preproc.keys.shape(), dummy_preproc.keys.shape());
-        assert_eq!(preproc.errors.shape(), dummy_preproc.errors.shape());
-        assert!(preproc.randoms.shape() <= dummy_preproc.randoms.shape());
-        assert!(preproc.zeros.shape() <= dummy_preproc.zeros.shape());
+        assert_eq!(preproc.errors.len(), dummy_preproc.errors.len());
+        assert!(preproc.randoms.len() >= dummy_preproc.randoms.len());
+        assert!(preproc.zeros.len() >= dummy_preproc.zeros.len());
     }
 }
 

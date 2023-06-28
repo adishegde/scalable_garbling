@@ -26,10 +26,14 @@ pub async fn reduce_degree<const W: u8>(
     vx: Array1<PackedShare<W>>,
     random: Array1<PackedShare<W>>,
     zero: Array1<PackedShare<W>>,
+    leader: Option<PartyID>,
     context: MPCContext<W>,
     net: Network,
 ) -> Array1<PackedShare<W>> {
-    let leader = leader_from_proto_id(&id, context.n);
+    let leader = match leader {
+        Some(pid) => pid,
+        None => leader_from_proto_id(&id, context.n),
+    };
     let num = vx.len();
 
     let vrecon = Zip::from(&vx)
@@ -85,13 +89,14 @@ pub async fn mult<const W: u8>(
     vy: Array1<PackedShare<W>>,
     random: Array1<PackedShare<W>>,
     zero: Array1<PackedShare<W>>,
+    leader: Option<PartyID>,
     context: MPCContext<W>,
     net: Network,
 ) -> Array1<PackedShare<W>> {
     Zip::from(&mut vx).and(&vy).par_for_each(|x, y| {
         *x *= y;
     });
-    reduce_degree(id, vx, random, zero, context, net).await
+    reduce_degree(id, vx, random, zero, leader, context, net).await
 }
 
 #[derive(Clone)]

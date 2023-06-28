@@ -9,6 +9,7 @@ use crate::PartyID;
 use bincode::{deserialize, serialize};
 use ndarray::{parallel::prelude::*, s, Array1, Array2, Array3, ArrayView1};
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::task::spawn;
 
@@ -199,11 +200,11 @@ pub async fn randbit<const W: u8>(
 pub struct PreProc<const W: u8> {
     // Mask for each packed gate
     pub masks: Array1<PackedShare<W>>,
-    // keys[b][l][g] gives the l-th index of the b-label LPN key for the g-th gate.
+    // keys[g][b][l] gives the l-th index of the b-label LPN key for the g-th gate.
     pub keys: Array3<GF<W>>,
-    pub randoms: Array1<PackedShare<W>>,
-    pub zeros: Array1<PackedShare<W>>,
-    pub errors: Array1<PackedShare<W>>,
+    pub randoms: VecDeque<PackedShare<W>>,
+    pub zeros: VecDeque<PackedShare<W>>,
+    pub errors: VecDeque<PackedShare<W>>,
 }
 
 #[derive(Clone, Copy)]
@@ -239,7 +240,7 @@ impl PreProcCount {
 
         Self {
             masks: num_blocks,
-            keys: (2, context.lpn_key_len, num_blocks),
+            keys: (num_blocks, 2, context.lpn_key_len),
             randoms: num_rand,
             zeros: num_zeros,
             errors: num_errors,
@@ -263,7 +264,7 @@ impl<const W: u8> PreProc<W> {
             move || iter.next().unwrap()
         };
 
-        let zero_n_gen = {
+        let mut zero_n_gen = {
             let secrets = Array1::zeros(context.l);
             let small_pool: Vec<_> = (0..100)
                 .map(|_| context.pss_n.share(secrets.view(), &mut rng)[id as usize])
@@ -290,9 +291,11 @@ impl<const W: u8> PreProc<W> {
         Self {
             masks: Array1::from_shape_simple_fn(counts.masks, bit_gen),
             keys: Array3::from_shape_simple_fn(counts.keys, &mut rand_gen),
-            randoms: Array1::from_shape_simple_fn(counts.randoms, &mut rand_gen),
-            zeros: Array1::from_shape_simple_fn(counts.zeros, zero_n_gen),
-            errors: Array1::from_shape_simple_fn(counts.errors, &mut rand_gen),
+            randoms: VecDeque::from_iter(
+                std::iter::repeat_with(&mut rand_gen).take(counts.randoms),
+            ),
+            zeros: VecDeque::from_iter(std::iter::repeat_with(&mut zero_n_gen).take(counts.zeros)),
+            errors: VecDeque::from_iter(std::iter::repeat_with(&mut rand_gen).take(counts.errors)),
         }
     }
 }
@@ -309,7 +312,7 @@ pub async fn preproc<const W: u8>(
     // TODO: Implement for general bais parameter.
     debug_assert_eq!(context.lpn_tau, 2);
 
-    let mut id_gen = ProtocolIDBuilder::new(&id, 4);
+    let mut id_gen = ProtocolIDBuilder::new(&id, 4 + context.n as u64);
 
     let rand_fut = {
         let num_rand_shares =
@@ -342,59 +345,83 @@ pub async fn preproc<const W: u8>(
         ))
     };
 
-    let mut rand_shares = rand_fut.await.unwrap().to_vec();
-    let mut zero_shares = zero_fut.await.unwrap().to_vec();
-    let mut rbit_shares = rbit_fut.await.unwrap().to_vec();
+    let mut rand_shares: VecDeque<_> = rand_fut.await.unwrap().to_vec().into();
+    let mut zero_shares: VecDeque<_> = zero_fut.await.unwrap().to_vec().into();
+    let mut rbit_shares: VecDeque<_> = rbit_fut.await.unwrap().to_vec().into();
 
-    let mut error_rand =
-        rand_shares.split_off(desc.keys.0 * desc.keys.1 * desc.keys.2 + desc.randoms);
-    let mut error_zeros = zero_shares.split_off(desc.zeros);
-    let mut error_rbits = rbit_shares.split_off(desc.masks);
+    let mut error_rand: VecDeque<_> = rand_shares.drain(..(3 * desc.errors)).collect();
+    let mut error_zeros: VecDeque<_> = zero_shares.drain(..(2 * desc.errors)).collect();
+    let mut error_rbits: VecDeque<_> = rbit_shares.drain(..(2 * desc.errors)).collect();
 
-    let err_id = id_gen.next().unwrap();
-    let error_shares = spawn(async move {
-        let rbit0 = {
-            let mut vals = error_rbits.split_off(desc.errors);
-            vals.truncate(desc.errors);
-            Array1::from_vec(vals)
-        };
-        let rbit1 = Array1::from_vec(error_rbits);
-        let rands = {
-            let mut vals = error_rand.split_off(2 * desc.errors);
-            vals.truncate(desc.errors);
-            Array1::from_vec(vals)
-        };
-        let zeros = {
-            let mut vals = error_zeros.split_off(desc.errors);
-            vals.truncate(desc.errors);
-            Array1::from_vec(vals)
-        };
+    let error_shares = {
+        let batch_size = desc.errors / context.n;
 
-        let biased_bits = core::mult(
-            err_id.clone(),
-            rbit0,
-            rbit1,
-            rands,
-            zeros,
-            context.clone(),
-            net.clone(),
-        )
-        .await;
+        let mut handles = Vec::with_capacity(context.n);
+        for (leader, bsize) in std::iter::repeat(batch_size)
+            .take(context.n - 1)
+            .chain(std::iter::once(desc.errors - (context.n - 1) * batch_size))
+            .enumerate()
+        {
+            let rbit0 = Array1::from_vec(error_rbits.drain(..bsize).collect());
+            let rbit1 = Array1::from_vec(error_rbits.drain(..bsize).collect());
+            let mut brand: VecDeque<_> = error_rand.drain(..(3 * bsize)).collect();
+            let mut bzeros: VecDeque<_> = error_zeros.drain(..(2 * bsize)).collect();
+            let context = context.clone();
+            let net = net.clone();
+            let leader: PartyID = leader.try_into().unwrap();
+            let err_id = id_gen.next().unwrap();
 
-        let scalars = Array1::from_vec(error_rand.split_off(desc.errors));
-        let rand = Array1::from_vec(error_rand);
-        let zeros = Array1::from_vec(error_zeros);
+            handles.push(spawn(async move {
+                let rands = Array1::from_vec(brand.drain(..bsize).collect());
+                let zeros = Array1::from_vec(bzeros.drain(..bsize).collect());
 
-        core::mult(err_id, biased_bits, scalars, rand, zeros, context, net).await
-    });
+                let biased_bits = core::mult(
+                    err_id.clone(),
+                    rbit0,
+                    rbit1,
+                    rands,
+                    zeros,
+                    Some(leader),
+                    context.clone(),
+                    net.clone(),
+                )
+                .await;
 
-    let key_shares = rand_shares.split_off(desc.randoms);
+                let scalars = Array1::from_vec(brand.drain(..bsize).collect());
+                let rand = Array1::from_vec(brand.into());
+                let zeros = Array1::from_vec(bzeros.into());
+
+                core::mult(
+                    err_id,
+                    biased_bits,
+                    scalars,
+                    rand,
+                    zeros,
+                    Some(leader),
+                    context,
+                    net,
+                )
+                .await
+            }));
+        }
+
+        let mut errors = Vec::with_capacity(desc.errors);
+        for handle in handles {
+            errors.extend(handle.await.unwrap().into_iter());
+        }
+        errors.into()
+    };
+
+    let key_shares = rand_shares
+        .drain(..(desc.keys.0 * desc.keys.1 * desc.keys.2))
+        .collect();
+    rbit_shares.truncate(desc.masks);
 
     PreProc {
-        masks: Array1::from_vec(rbit_shares),
+        masks: Array1::from_vec(rbit_shares.into()),
         keys: Array3::from_shape_vec(desc.keys, key_shares).unwrap(),
-        randoms: Array1::from_vec(rand_shares),
-        zeros: Array1::from_vec(zero_shares),
-        errors: error_shares.await.unwrap(),
+        randoms: rand_shares,
+        zeros: zero_shares,
+        errors: error_shares,
     }
 }
