@@ -68,15 +68,16 @@ pub async fn reduce_degree<const W: u8>(
 
         for i in 0..context.n {
             net.send(SendMessage {
-                to: Recipient::One(i as PartyID),
+                to: Recipient::One(i.try_into().unwrap()),
                 proto_id: id.clone(),
-                data: serialize(&shares.slice(s![.., i])).unwrap(),
+                data: serialize(&shares.slice(s![.., i]).to_vec()).unwrap(),
             })
             .await;
         }
     }
 
-    let mut shares: Array1<GF<W>> = deserialize(&net.recv(id).await.data).unwrap();
+    let mut shares: Array1<GF<W>> =
+        Array1::from_vec(deserialize(&net.recv(id).await.data).unwrap());
     Zip::from(&mut shares).and(&random).par_for_each(|s, r| {
         *s -= r;
     });
@@ -178,15 +179,16 @@ pub async fn trans<const W: u8>(
 
         for i in 0..context.n {
             net.send(SendMessage {
-                to: Recipient::One(i as PartyID),
+                to: Recipient::One(i.try_into().unwrap()),
                 proto_id: id.clone(),
-                data: serialize(&shares.slice(s![.., i])).unwrap(),
+                data: serialize(&shares.slice(s![.., i]).to_vec()).unwrap(),
             })
             .await;
         }
     }
 
-    let mut shares: Array1<GF<W>> = deserialize(&net.recv(id).await.data).unwrap();
+    let mut shares: Array1<GF<W>> =
+        Array1::from_vec(deserialize(&net.recv(id).await.data).unwrap());
     Zip::from(&mut shares).and(&random).par_for_each(|s, r| {
         *s -= r;
     });
@@ -345,9 +347,13 @@ pub async fn randtrans<const W: u8>(
 
     for i in 0..context.n {
         net.send(SendMessage {
-            to: Recipient::One(i as PartyID),
+            to: Recipient::One(i.try_into().unwrap()),
             proto_id: id.clone(),
-            data: serialize(&(&shares.slice(s![.., i]), &shares_n.slice(s![.., i]))).unwrap(),
+            data: serialize(&(
+                shares.slice(s![.., i]).to_vec(),
+                shares_n.slice(s![.., i]).to_vec(),
+            ))
+            .unwrap(),
         })
         .await;
     }
@@ -357,20 +363,14 @@ pub async fn randtrans<const W: u8>(
             .await
             .into_par_iter()
             .map(|d| {
-                let (shares, shares_n): (Array1<GF<W>>, Array1<GF<W>>) = deserialize(&d).unwrap();
+                let (shares, shares_n): (Vec<GF<W>>, Vec<GF<W>>) = deserialize(&d).unwrap();
                 (shares, shares_n)
             })
             .unzip();
 
-    let shares = shares
-        .into_par_iter()
-        .flat_map_iter(|s| s.to_vec())
-        .collect();
+    let shares = shares.into_par_iter().flat_map_iter(|s| s).collect();
     let shares = Array2::from_shape_vec((context.n, num), shares).unwrap();
-    let shares_n = shares_n
-        .into_par_iter()
-        .flat_map_iter(|s| s.to_vec())
-        .collect();
+    let shares_n = shares_n.into_par_iter().flat_map_iter(|s| s).collect();
     let shares_n = Array2::from_shape_vec((context.n, num), shares_n).unwrap();
 
     let shares = context.pss_n.recon_coeffs().dot(&shares).reversed_axes();

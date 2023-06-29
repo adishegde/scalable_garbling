@@ -9,7 +9,7 @@ use crate::PartyID;
 use bincode::{deserialize, serialize};
 use ndarray::{parallel::prelude::*, s, Array1, Array2, Array3, ArrayView1};
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeStruct, Serialize, Serializer};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::task::spawn;
@@ -54,9 +54,9 @@ pub async fn rand<const W: u8>(
 
     for i in 0..context.n {
         net.send(SendMessage {
-            to: Recipient::One(i as PartyID),
+            to: Recipient::One(i.try_into().unwrap()),
             proto_id: id.clone(),
-            data: serialize(&shares.slice(s![.., i])).unwrap(),
+            data: serialize(&shares.slice(s![.., i]).to_vec()).unwrap(),
         })
         .await;
     }
@@ -65,7 +65,7 @@ pub async fn rand<const W: u8>(
     let sent_shares: Vec<_> = network::message_from_each_party(id.clone(), &net, context.n)
         .await
         .into_par_iter()
-        .flat_map(|d| deserialize::<Array1<GF<W>>>(&d).unwrap().to_vec())
+        .flat_map(|d| deserialize::<Vec<GF<W>>>(&d).unwrap())
         .collect();
     let sent_shares = Array2::from_shape_vec((context.n, batches), sent_shares).unwrap();
 
@@ -115,9 +115,9 @@ pub async fn zero<const W: u8>(
 
     for i in 0..context.n {
         net.send(SendMessage {
-            to: Recipient::One(i as PartyID),
+            to: Recipient::One(i.try_into().unwrap()),
             proto_id: id.clone(),
-            data: serialize(&shares.slice(s![.., i])).unwrap(),
+            data: serialize(&shares.slice(s![.., i]).to_vec()).unwrap(),
         })
         .await;
     }
@@ -125,7 +125,7 @@ pub async fn zero<const W: u8>(
     let sent_shares: Vec<_> = network::message_from_each_party(id.clone(), &net, context.n)
         .await
         .into_par_iter()
-        .flat_map(|d| deserialize::<Array1<GF<W>>>(&d).unwrap().to_vec())
+        .flat_map(|d| deserialize::<Vec<GF<W>>>(&d).unwrap())
         .collect();
     let sent_shares = Array2::from_shape_vec((context.n, batches), sent_shares).unwrap();
 
@@ -176,9 +176,9 @@ pub async fn randbit<const W: u8>(
 
     for i in 0..context.n {
         net.send(SendMessage {
-            to: Recipient::One(i as PartyID),
+            to: Recipient::One(i.try_into().unwrap()),
             proto_id: id.clone(),
-            data: serialize(&shares.slice(s![.., i])).unwrap(),
+            data: serialize(&shares.slice(s![.., i]).to_vec()).unwrap(),
         })
         .await;
     }
@@ -186,7 +186,7 @@ pub async fn randbit<const W: u8>(
     let sent_shares: Vec<_> = network::message_from_each_party(id.clone(), &net, context.n)
         .await
         .into_par_iter()
-        .flat_map(|d| deserialize::<Array1<GF<W>>>(&d).unwrap().to_vec())
+        .flat_map(|d| deserialize::<Vec<GF<W>>>(&d).unwrap())
         .collect();
     let sent_shares = Array2::from_shape_vec((context.n, batches), sent_shares).unwrap();
 
@@ -197,7 +197,7 @@ pub async fn randbit<const W: u8>(
         .unwrap()
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct PreProc<const W: u8> {
     // Mask for each packed gate
     pub masks: Array1<PackedShare<W>>,
@@ -206,6 +206,21 @@ pub struct PreProc<const W: u8> {
     pub randoms: VecDeque<PackedShare<W>>,
     pub zeros: VecDeque<PackedShare<W>>,
     pub errors: VecDeque<PackedShare<W>>,
+}
+
+impl<const W: u8> Serialize for PreProc<W> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut preproc = serializer.serialize_struct("PreProc", 5)?;
+        preproc.serialize_field("masks", &self.masks.as_slice())?;
+        preproc.serialize_field("keys", self.keys.as_slice().unwrap())?;
+        preproc.serialize_field("randoms", &self.randoms)?;
+        preproc.serialize_field("zeros", &self.zeros)?;
+        preproc.serialize_field("errors", &self.errors)?;
+        preproc.end()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -313,7 +328,7 @@ pub async fn preproc<const W: u8>(
     // TODO: Implement for general bais parameter.
     debug_assert_eq!(context.lpn_tau, 2);
 
-    let mut id_gen = ProtocolIDBuilder::new(&id, 4 + context.n as u64);
+    let mut id_gen = ProtocolIDBuilder::new(&id, 4 + 2 * context.n as u64);
 
     let rand_fut = {
         let num_rand_shares =
@@ -370,14 +385,15 @@ pub async fn preproc<const W: u8>(
             let context = context.clone();
             let net = net.clone();
             let leader: PartyID = leader.try_into().unwrap();
-            let err_id = id_gen.next().unwrap();
+            let err_id_1 = id_gen.next().unwrap();
+            let err_id_2 = id_gen.next().unwrap();
 
             handles.push(spawn(async move {
                 let rands = Array1::from_vec(brand.drain(..bsize).collect());
                 let zeros = Array1::from_vec(bzeros.drain(..bsize).collect());
 
                 let biased_bits = core::mult(
-                    err_id.clone(),
+                    err_id_1,
                     rbit0,
                     rbit1,
                     rands,
@@ -393,7 +409,7 @@ pub async fn preproc<const W: u8>(
                 let zeros = Array1::from_vec(bzeros.into());
 
                 core::mult(
-                    err_id,
+                    err_id_2,
                     biased_bits,
                     scalars,
                     rand,
