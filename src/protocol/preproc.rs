@@ -9,7 +9,7 @@ use crate::PartyID;
 use bincode::{deserialize, serialize};
 use ndarray::{parallel::prelude::*, s, Array1, Array2, Array3, ArrayView1};
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use serde::{ser::SerializeStruct, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::task::spawn;
@@ -197,7 +197,9 @@ pub async fn randbit<const W: u8>(
         .unwrap()
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(from = "PreProcSer<W>")]
+#[serde(into = "PreProcSer<W>")]
 pub struct PreProc<const W: u8> {
     // Mask for each packed gate
     pub masks: Array1<PackedShare<W>>,
@@ -206,21 +208,6 @@ pub struct PreProc<const W: u8> {
     pub randoms: VecDeque<PackedShare<W>>,
     pub zeros: VecDeque<PackedShare<W>>,
     pub errors: VecDeque<PackedShare<W>>,
-}
-
-impl<const W: u8> Serialize for PreProc<W> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut preproc = serializer.serialize_struct("PreProc", 5)?;
-        preproc.serialize_field("masks", &self.masks.as_slice())?;
-        preproc.serialize_field("keys", self.keys.as_slice().unwrap())?;
-        preproc.serialize_field("randoms", &self.randoms)?;
-        preproc.serialize_field("zeros", &self.zeros)?;
-        preproc.serialize_field("errors", &self.errors)?;
-        preproc.end()
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -440,5 +427,44 @@ pub async fn preproc<const W: u8>(
         randoms: rand_shares,
         zeros: zero_shares,
         errors: error_shares,
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct PreProcSer<const W: u8> {
+    masks: Vec<PackedShare<W>>,
+    keys: Vec<PackedShare<W>>,
+    randoms: Vec<PackedShare<W>>,
+    zeros: Vec<PackedShare<W>>,
+    errors: Vec<PackedShare<W>>,
+}
+
+impl<const W: u8> From<PreProc<W>> for PreProcSer<W> {
+    fn from(value: PreProc<W>) -> Self {
+        Self {
+            masks: value.masks.to_vec(),
+            keys: value.keys.into_raw_vec(),
+            randoms: value.randoms.into(),
+            zeros: value.zeros.into(),
+            errors: value.errors.into(),
+        }
+    }
+}
+
+impl<const W: u8> From<PreProcSer<W>> for PreProc<W> {
+    fn from(value: PreProcSer<W>) -> Self {
+        let kshape = (
+            value.masks.len(),
+            2,
+            value.keys.len() / (2 * value.masks.len()),
+        );
+
+        Self {
+            masks: Array1::from_vec(value.masks),
+            keys: Array3::from_shape_vec(kshape, value.keys).unwrap(),
+            randoms: value.randoms.into(),
+            zeros: value.zeros.into(),
+            errors: value.errors.into(),
+        }
     }
 }

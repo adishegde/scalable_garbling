@@ -2,14 +2,15 @@ mod bindings;
 use num_traits::identities::{One, Zero};
 use rand::distributions::{Distribution, Uniform};
 use rand::Rng;
-use serde::{Deserialize, Serialize};
+use serde::de::{Deserialize, Deserializer, Visitor};
+use serde::ser::{Serialize, SerializeTuple, Serializer};
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 use std::sync::{Once, OnceLock};
 
 /// Galois field elements where the order of the field is 2^W.
 ///
 /// Note that W is expected to be less than 30.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GF<const W: u8>(u32);
 
 impl<const W: u8> GF<W> {
@@ -295,5 +296,52 @@ impl<const W: u8> Zero for GF<W> {
 impl<const W: u8> One for GF<W> {
     fn one() -> Self {
         Self::ONE
+    }
+}
+
+impl<const W: u8> Serialize for GF<W> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut tup = serializer.serialize_tuple(Self::NUM_BYTES)?;
+        let val = self.0.to_le_bytes();
+        for i in 0..Self::NUM_BYTES {
+            tup.serialize_element(&val[i])?;
+        }
+        tup.end()
+    }
+}
+
+impl<'de, const W: u8> Deserialize<'de> for GF<W> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let visitor = GFVisitor;
+        deserializer.deserialize_tuple(GF::<W>::NUM_BYTES, visitor)
+    }
+}
+
+struct GFVisitor<const W: u8>;
+
+impl<'de, const W: u8> Visitor<'de> for GFVisitor<W> {
+    type Value = GF<W>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(formatter, "a sequence of {} u8 integers", (W + 7) / 8)
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut vals = [0u8; 4];
+        for v in vals.iter_mut().take(GF::<W>::NUM_BYTES) {
+            let element = seq.next_element()?;
+            *v = element.unwrap();
+        }
+
+        Ok(GF(u32::from_le_bytes(vals)))
     }
 }

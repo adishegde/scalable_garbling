@@ -173,3 +173,24 @@ fn combination() {
 
     assert_eq!(out, exp);
 }
+
+#[test]
+fn serialize() {
+    GF::<W>::init().unwrap();
+
+    let a: GF<W> = GF::from(1242u32);
+    let bytes_a = bincode::serialize(&a).unwrap();
+
+    assert_eq!(bytes_a.len(), GF::<W>::NUM_BYTES);
+}
+
+#[test]
+fn deserialize() {
+    GF::<W>::init().unwrap();
+
+    let a: GF<W> = GF::from(1242u32);
+    let bytes_a = bincode::serialize(&a).unwrap();
+    let b: GF<W> = bincode::deserialize(&bytes_a).unwrap();
+
+    assert_eq!(a, b);
+}
