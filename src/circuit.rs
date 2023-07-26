@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -19,7 +20,6 @@ pub enum Gate {
 
 #[derive(Clone)]
 pub struct Circuit {
-    // Gates should be topologically ordered so that they can be evaluated in sequence.
     gates: Vec<Gate>,
     inputs: Vec<Vec<WireID>>,
     outputs: Vec<Vec<WireID>>,
@@ -97,7 +97,7 @@ impl Circuit {
         let inputs: Vec<Vec<WireID>> = inp_lens
             .into_iter()
             .scan(0, |state, v| {
-                *state = *state + v;
+                *state += v;
                 Some(((*state - v)..(*state)).collect())
             })
             .collect();
@@ -108,7 +108,7 @@ impl Circuit {
             .into_iter()
             .rev()
             .scan(num_wires, |state, v| {
-                *state = *state - v;
+                *state -= v;
                 Some(((*state)..(*state + v)).collect())
             })
             .collect();
@@ -121,7 +121,7 @@ impl Circuit {
             let line: Vec<_> = line.split_ascii_whitespace().collect();
             let gate_type = line.last().unwrap().to_owned();
             let mut iter = line[..(line.len() - 1)]
-                .into_iter()
+                .iter()
                 .map(|s| s.parse::<u32>().unwrap());
 
             let fan_in = iter.next().unwrap();
@@ -169,7 +169,7 @@ impl Circuit {
                 Gate::Xor(ginf) => {
                     let left_val = wires[ginf.inp[0] as usize];
                     let right_val = wires[ginf.inp[1] as usize];
-                    wires[ginf.out as usize] = !(left_val == right_val);
+                    wires[ginf.out as usize] = left_val != right_val;
                 }
                 Gate::And(ginf) => {
                     let left_val = wires[ginf.inp[0] as usize];
@@ -215,18 +215,18 @@ impl Circuit {
             }
         }
 
-        let gates: Vec<_> = g_and
-            .chunks(gates_per_block as usize)
-            .map(|x| PackedGate::And(PackedGateInfo::from(x)))
+        let gates: Vec<_> = Self::pack_gate_info(gates_per_block, g_and)
+            .into_iter()
+            .map(PackedGate::And)
             .chain(
-                g_xor
-                    .chunks(gates_per_block as usize)
-                    .map(|x| PackedGate::Xor(PackedGateInfo::from(x))),
+                Self::pack_gate_info(gates_per_block, g_xor)
+                    .into_iter()
+                    .map(PackedGate::Xor),
             )
             .chain(
-                g_inv
-                    .chunks(gates_per_block as usize)
-                    .map(|x| PackedGate::Inv(PackedGateInfo::from(x))),
+                Self::pack_gate_info(gates_per_block, g_inv)
+                    .into_iter()
+                    .map(PackedGate::Inv),
             )
             .collect();
 
@@ -248,6 +248,41 @@ impl Circuit {
             num_wires: self.num_wires,
             gates_per_block,
         }
+    }
+
+    fn pack_gate_info<const N: usize>(
+        gates_per_block: u32,
+        mut gates: Vec<GateInfo<N>>,
+    ) -> Vec<PackedGateInfo<N>> {
+        let mut fan_outs = HashMap::new();
+
+        for g in gates.iter() {
+            for i in 0..N {
+                *fan_outs.entry(g.inp[i]).or_insert(0) += 1;
+            }
+        }
+
+        gates.sort_by(|g1, g2| {
+            let g1_wt = g1
+                .inp
+                .iter()
+                .map(|i| (fan_outs.get(i).unwrap(), i))
+                .max()
+                .unwrap();
+            let g2_wt = g2
+                .inp
+                .iter()
+                .map(|i| (fan_outs.get(i).unwrap(), i))
+                .max()
+                .unwrap();
+
+            g1_wt.cmp(&g2_wt)
+        });
+
+        gates
+            .chunks(gates_per_block as usize)
+            .map(PackedGateInfo::from)
+            .collect()
     }
 }
 
@@ -279,9 +314,9 @@ impl PackedCircuit {
 
         for gate in &self.gates {
             match gate {
-                PackedGate::And(_) => num_and = num_and + 1,
-                PackedGate::Xor(_) => num_xor = num_xor + 1,
-                PackedGate::Inv(_) => num_inv = num_inv + 1,
+                PackedGate::And(_) => num_and += 1,
+                PackedGate::Xor(_) => num_xor += 1,
+                PackedGate::Inv(_) => num_inv += 1,
             }
         }
 

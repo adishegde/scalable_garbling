@@ -24,8 +24,7 @@ async fn net_local_two_party() {
                 to: network::Recipient::One(1),
                 proto_id: proto_id.clone(),
                 data: data.clone(),
-            })
-            .await;
+            });
 
             let mssg = net.recv(proto_id.clone()).await;
             assert_eq!(mssg.from, 1);
@@ -55,8 +54,7 @@ async fn net_local_two_party() {
             to: network::Recipient::One(0),
             proto_id,
             data,
-        })
-        .await;
+        });
 
         assert_eq!(stats.party(0).await.0, data_len);
         assert_eq!(stats.party(1).await, (0, 0));
@@ -83,8 +81,7 @@ async fn net_local_many_parties() {
                 to: network::Recipient::All,
                 proto_id: proto_id.clone(),
                 data: data.clone(),
-            })
-            .await;
+            });
 
             let mut recv_ids = vec![false; num as usize];
 
@@ -133,15 +130,13 @@ async fn net_local_many_parties_two_ids() {
                 to: network::Recipient::All,
                 proto_id: proto_id1.clone(),
                 data: data1.clone(),
-            })
-            .await;
+            });
 
             net.send(network::SendMessage {
                 to: network::Recipient::All,
                 proto_id: proto_id2.clone(),
                 data: data2.clone(),
-            })
-            .await;
+            });
 
             for _ in 0..num {
                 let mssg2 = net.recv(proto_id2.clone()).await;
@@ -185,8 +180,7 @@ async fn net_tcp_two_party() {
                 to: network::Recipient::One(1),
                 proto_id: proto_id.clone(),
                 data: data.clone(),
-            })
-            .await;
+            });
 
             let mssg = net.recv(proto_id.clone()).await;
             assert_eq!(mssg.from, 1);
@@ -216,8 +210,7 @@ async fn net_tcp_two_party() {
             to: network::Recipient::One(0),
             proto_id,
             data,
-        })
-        .await;
+        });
 
         assert_eq!(stats.party(0).await.0, data_len);
         assert_eq!(stats.party(1).await, (0, 0));
@@ -248,8 +241,7 @@ async fn net_tcp_many_parties() {
                 to: network::Recipient::All,
                 proto_id: proto_id.clone(),
                 data: data.clone(),
-            })
-            .await;
+            });
 
             let mut recv_ids = vec![false; num as usize];
 
@@ -302,15 +294,13 @@ async fn net_tcp_many_parties_two_ids() {
                 to: network::Recipient::All,
                 proto_id: proto_id1.clone(),
                 data: data1.clone(),
-            })
-            .await;
+            });
 
             net.send(network::SendMessage {
                 to: network::Recipient::All,
                 proto_id: proto_id2.clone(),
                 data: data2.clone(),
-            })
-            .await;
+            });
 
             for _ in 0..num {
                 let mssg2 = net.recv(proto_id2.clone()).await;

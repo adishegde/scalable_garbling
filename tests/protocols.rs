@@ -1,9 +1,9 @@
 use ndarray::{s, Array2, Array3, ArrayView1, ArrayView2, Axis};
 use rand::{rngs::StdRng, Rng, SeedableRng};
-use scalable_mpc::circuit::Circuit;
+use scalable_mpc::circuit::{Circuit, PackedGate};
 use scalable_mpc::math;
 use scalable_mpc::math::{galois::GF, Combination};
-use scalable_mpc::protocol::{core, network, preproc, MPCContext};
+use scalable_mpc::protocol::{core, garble, network, preproc, MPCContext};
 use scalable_mpc::sharing::PackedSharing;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -298,8 +298,8 @@ async fn preproc() {
 
     let super_inv_matrix = Arc::new(math::super_inv_matrix(N, N - T));
 
-    let dummy_preproc = preproc::PreProc::dummy(0, 0, &circ, &contexts[0].1);
     let desc = preproc::PreProc::describe(&circ, &contexts[0].1);
+    let dummy_preproc = preproc::PreProc::dummy(0, desc, &contexts[0].1);
 
     let mut handles = Vec::new();
     for (net, context) in contexts {
@@ -380,7 +380,8 @@ async fn trans() {
 
     let mut handles = Vec::new();
     for (i, (net, context)) in contexts.into_iter().enumerate() {
-        let transform = core::SharingTransform::new(&old_pos, &new_pos, f_trans.clone(), &context);
+        let transform =
+            core::SharingTransform::new(old_pos.clone(), new_pos.clone(), f_trans.clone());
 
         handles.push(spawn(core::trans(
             proto_id.clone(),
@@ -388,6 +389,7 @@ async fn trans() {
             random.slice(s![.., i]).to_owned(),
             random_n.slice(s![.., i]).to_owned(),
             transform,
+            None,
             context,
             net,
         )));
@@ -467,7 +469,8 @@ async fn trans_incomplete_block() {
 
     let mut handles = Vec::new();
     for (i, (net, context)) in contexts.into_iter().enumerate() {
-        let transform = core::SharingTransform::new(&old_pos, &new_pos, f_trans.clone(), &context);
+        let transform =
+            core::SharingTransform::new(old_pos.clone(), new_pos.clone(), f_trans.clone());
 
         handles.push(spawn(core::trans(
             proto_id.clone(),
@@ -475,6 +478,7 @@ async fn trans_incomplete_block() {
             random.slice(s![.., i]).to_owned(),
             random_n.slice(s![.., i]).to_owned(),
             transform,
+            None,
             context,
             net,
         )));
@@ -537,23 +541,18 @@ async fn randtrans() {
     for (i, (net, context)) in contexts.into_iter().enumerate() {
         let transform = core::RandSharingTransform::new(&old_pos, &new_pos, &f_trans, &context);
 
-        let mut transforms = Vec::with_capacity(NUM);
-        for _ in 0..NUM {
-            transforms.push(transform.clone());
-        }
-
         handles.push(spawn(core::randtrans(
             proto_id.clone(),
-            rand_shares.slice(s![.., i]).to_vec(),
-            zero_shares.slice(s![.., i]).to_vec(),
-            transforms,
+            rand_shares.slice(s![.., i]).iter().cloned().collect(),
+            zero_shares.slice(s![.., i]).iter().cloned().collect(),
+            transform,
             context,
             net,
         )));
     }
 
-    let mut sharings = Array3::zeros((0, NUM, L));
-    let mut sharings_n = Array3::zeros((0, NUM, L));
+    let mut sharings = Array3::zeros((0, L, NUM));
+    let mut sharings_n = Array3::zeros((0, L, NUM));
     for handle in handles {
         let (shares, shares_n) = handle.await.unwrap();
         sharings.push(Axis(0), shares.view()).unwrap();
@@ -574,11 +573,11 @@ async fn randtrans() {
 
         for j in 0..NUM {
             let osec = PackedSharing::recon_using_coeffs(
-                sharings_n.slice(s![.., j, i]),
+                sharings_n.slice(s![.., i, j]),
                 orec_coeffs.view(),
             );
             let nsec =
-                PackedSharing::recon_using_coeffs(sharings.slice(s![.., j, i]), nrec_coeffs.view());
+                PackedSharing::recon_using_coeffs(sharings.slice(s![.., i, j]), nrec_coeffs.view());
             debug_assert_eq!(nsec.to_vec(), f_trans[i].apply(ArrayView1::from(&osec)));
         }
     }
@@ -609,23 +608,18 @@ async fn randtrans_incomplete_block() {
     for (i, (net, context)) in contexts.into_iter().enumerate() {
         let transform = core::RandSharingTransform::new(&old_pos, &new_pos, &f_trans, &context);
 
-        let mut transforms = Vec::with_capacity(NUM);
-        for _ in 0..NUM {
-            transforms.push(transform.clone());
-        }
-
         handles.push(spawn(core::randtrans(
             proto_id.clone(),
-            rand_shares.slice(s![.., i]).to_vec(),
-            zero_shares.slice(s![.., i]).to_vec(),
-            transforms,
+            rand_shares.slice(s![.., i]).iter().cloned().collect(),
+            zero_shares.slice(s![.., i]).iter().cloned().collect(),
+            transform,
             context,
             net,
         )));
     }
 
-    let mut sharings = Array3::zeros((0, NUM, L));
-    let mut sharings_n = Array3::zeros((0, NUM, L));
+    let mut sharings = Array3::zeros((0, L, NUM));
+    let mut sharings_n = Array3::zeros((0, L, NUM));
     for handle in handles {
         let (shares, shares_n) = handle.await.unwrap();
         sharings.push(Axis(0), shares.view()).unwrap();
@@ -646,12 +640,49 @@ async fn randtrans_incomplete_block() {
 
         for j in 0..NUM {
             let osec = PackedSharing::recon_using_coeffs(
-                sharings_n.slice(s![.., j, i]),
+                sharings_n.slice(s![.., i, j]),
                 orec_coeffs.view(),
             );
             let nsec =
-                PackedSharing::recon_using_coeffs(sharings.slice(s![.., j, i]), nrec_coeffs.view());
+                PackedSharing::recon_using_coeffs(sharings.slice(s![.., i, j]), nrec_coeffs.view());
             debug_assert_eq!(nsec.to_vec(), f_trans[i].apply(ArrayView1::from(&osec)));
+        }
+    }
+}
+
+#[tokio::test]
+async fn garble() {
+    let circ = {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("tests/data/sub64.txt");
+        let circ = Circuit::from_bristol_fashion(&path);
+        circ.pack(L as u32)
+    };
+
+    let (_, _, contexts) = setup().await;
+
+    let mut handles = Vec::new();
+    for (net, context) in contexts.into_iter() {
+        let circ = circ.clone();
+        let desc = preproc::PreProc::describe(&circ, &context);
+        let preproc = preproc::PreProc::dummy(200, desc, &context);
+        let context = Arc::new(garble::GarbleContext::new(circ, context));
+        handles.push(spawn(async move {
+            garble::garble(b"".to_vec(), preproc, context, net).await
+        }))
+    }
+
+    for handle in handles {
+        let gc = handle.await.unwrap();
+
+        assert_eq!(gc.gates.len(), circ.gates().len());
+
+        for (gate, table) in circ.gates().iter().zip(gc.gates.iter()) {
+            match gate {
+                PackedGate::And(_) => assert_eq!(table.shape(), [4, LPN_MSSG_LEN]),
+                PackedGate::Xor(_) => assert_eq!(table.shape(), [4, LPN_MSSG_LEN]),
+                PackedGate::Inv(_) => assert_eq!(table.shape(), [2, LPN_MSSG_LEN]),
+            }
         }
     }
 }

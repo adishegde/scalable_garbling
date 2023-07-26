@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 const W: u8 = 18;
 
-/// Benchmark garbling phase.
+/// Compute size of preprocessing material.
 #[derive(FromArgs)]
 struct PreProcSize {
     /// file containing circuit description
@@ -66,7 +66,7 @@ fn benchmark(circ: PackedCircuit, opts: PreProcSize) {
     };
 
     let desc = preproc::PreProc::describe(&circ, &context);
-    let preproc = preproc::PreProc::dummy(0, 0, &circ, &context);
+    let preproc = preproc::PreProc::dummy(0, desc, &context);
     let preproc_size = bincode::serialized_size(&preproc).unwrap();
 
     println!("--- Preproc material info ---");
@@ -75,8 +75,7 @@ fn benchmark(circ: PackedCircuit, opts: PreProcSize) {
     println!("Random shares: {}", desc.randoms);
     println!("Random zeros: {}", desc.zeros);
     println!("Random errors: {}", desc.errors);
-    println!("");
-    println!("Total preproc size: {} bytes", preproc_size);
+    println!("\nTotal preproc size: {} bytes", preproc_size);
 
     let num_rand_shares = desc.keys.0 * desc.keys.1 * desc.keys.2 + desc.randoms + 3 * desc.errors;
     let num_zero_shares = desc.zeros + 2 * desc.errors;

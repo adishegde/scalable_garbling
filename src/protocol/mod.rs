@@ -6,6 +6,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 pub mod core;
+pub mod garble;
 pub mod network;
 pub mod preproc;
 
@@ -83,7 +84,7 @@ impl<S: Debug, R: Debug> ProtoHandle<S, R> {
         Self { tx_send, tx_recv }
     }
 
-    pub async fn send(&self, mssg: S) {
+    pub fn send(&self, mssg: S) {
         self.tx_send.send(mssg).unwrap();
     }
 

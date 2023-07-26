@@ -3,11 +3,11 @@ use super::network;
 use super::network::{Network, Recipient, SendMessage};
 use super::{MPCContext, ProtocolID, ProtocolIDBuilder};
 use crate::circuit::PackedCircuit;
-use crate::math::galois::GF;
+use crate::math::{galois::GF, lagrange_coeffs};
 use crate::sharing::{PackedShare, PackedSharing};
 use crate::PartyID;
 use bincode::{deserialize, serialize};
-use ndarray::{parallel::prelude::*, s, Array1, Array2, Array3, ArrayView1};
+use ndarray::{parallel::prelude::*, s, Array1, Array2, Array3, ArrayView1, Axis};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -57,8 +57,7 @@ pub async fn rand<const W: u8>(
             to: Recipient::One(i.try_into().unwrap()),
             proto_id: id.clone(),
             data: serialize(&shares.slice(s![.., i]).to_vec()).unwrap(),
-        })
-        .await;
+        });
     }
 
     // Receives shares from all parties.
@@ -81,6 +80,7 @@ pub struct ZeroContext<const W: u8> {
     super_inv: Arc<Array2<GF<W>>>,
     pss_n: Arc<PackedSharing<W>>,
     n: usize,
+    l: usize,
 }
 
 impl<const W: u8> ZeroContext<W> {
@@ -89,6 +89,7 @@ impl<const W: u8> ZeroContext<W> {
             super_inv: super_inv_matrix,
             pss_n: mpc_context.pss_n.clone(),
             n: mpc_context.n,
+            l: mpc_context.l,
         }
     }
 }
@@ -102,7 +103,7 @@ pub async fn zero<const W: u8>(
     let batch_size = context.super_inv.shape()[0];
     let batches = num_batches(num, batch_size);
 
-    let secrets = Array1::zeros(batches);
+    let secrets = Array1::zeros(context.l);
 
     let shares: Vec<_> = (0..batches)
         .into_par_iter()
@@ -118,8 +119,7 @@ pub async fn zero<const W: u8>(
             to: Recipient::One(i.try_into().unwrap()),
             proto_id: id.clone(),
             data: serialize(&shares.slice(s![.., i]).to_vec()).unwrap(),
-        })
-        .await;
+        });
     }
 
     let sent_shares: Vec<_> = network::message_from_each_party(id.clone(), &net, context.n)
@@ -179,8 +179,7 @@ pub async fn randbit<const W: u8>(
             to: Recipient::One(i.try_into().unwrap()),
             proto_id: id.clone(),
             data: serialize(&shares.slice(s![.., i]).to_vec()).unwrap(),
-        })
-        .await;
+        });
     }
 
     let sent_shares: Vec<_> = network::message_from_each_party(id.clone(), &net, context.n)
@@ -203,7 +202,7 @@ pub async fn randbit<const W: u8>(
 pub struct PreProc<const W: u8> {
     // Mask for each packed gate
     pub masks: Array1<PackedShare<W>>,
-    // keys[g][b][l] gives the l-th index of the b-label LPN key for the g-th gate.
+    // keys[b][l][g] gives the l-th index of the b-label LPN key for the g-th gate.
     pub keys: Array3<GF<W>>,
     pub randoms: VecDeque<PackedShare<W>>,
     pub zeros: VecDeque<PackedShare<W>>,
@@ -231,9 +230,9 @@ impl PreProcCount {
         let num_rtrans = (num_batches(num_blocks, context.l)
             + num_batches(num_inp_blocks, context.l))
             * num_trans_per_wire;
-        let num_mult = num_and * (4 * context.lpn_mssg_len + 1)
-            + num_xor * 4 * context.lpn_mssg_len
-            + num_inv * 2 * context.lpn_mssg_len;
+        let num_mult = num_and * (3 * (context.lpn_key_len + 1) + 1)
+            + num_xor * (context.lpn_key_len + 1)
+            + num_inv * (context.lpn_key_len + 1);
 
         let num_rand = num_rtrans * (context.n + context.t) + num_mult;
         let num_zeros = num_rtrans * 2 * context.n + num_mult;
@@ -243,7 +242,7 @@ impl PreProcCount {
 
         Self {
             masks: num_blocks,
-            keys: (num_blocks, 2, context.lpn_key_len),
+            keys: (2, context.lpn_key_len, num_blocks),
             randoms: num_rand,
             zeros: num_zeros,
             errors: num_errors,
@@ -256,49 +255,79 @@ impl<const W: u8> PreProc<W> {
         PreProcCount::new(circ, context)
     }
 
-    pub fn dummy(id: PartyID, seed: u64, circ: &PackedCircuit, context: &MPCContext<W>) -> Self {
+    pub fn dummy(seed: u64, counts: PreProcCount, context: &MPCContext<W>) -> Self {
         let mut rng = StdRng::seed_from_u64(seed);
+        const POOL_SIZE: usize = 100000;
+
+        let n: u32 = context.n.try_into().unwrap();
+        let l: u32 = context.l.try_into().unwrap();
+        let share_pos = PackedSharing::share_pos(n);
+        let def_pos = PackedSharing::default_pos(n, l);
+        let all_pos: Vec<_> = def_pos.iter().chain(share_pos.iter()).cloned().collect();
+        let coeffs = lagrange_coeffs(
+            &all_pos[..(context.t + context.l)],
+            &[share_pos[context.id as usize]],
+        );
+        let coeffs_n = lagrange_coeffs(&all_pos[..context.n], &[share_pos[context.id as usize]]);
 
         let mut rand_gen = {
-            let small_pool: Vec<_> = (0..100)
-                .map(|_| context.pss.rand(&mut rng)[id as usize])
-                .collect();
+            let small_pool = {
+                let inp = Array2::from_shape_simple_fn((context.t + context.l, POOL_SIZE), || {
+                    GF::rand(&mut rng)
+                });
+                coeffs.dot(&inp).into_shape(POOL_SIZE).unwrap().to_vec()
+            };
+
             let mut iter = small_pool.into_iter().cycle();
             move || iter.next().unwrap()
         };
 
-        let mut zero_n_gen = {
-            let secrets = Array1::zeros(context.l);
-            let small_pool: Vec<_> = (0..100)
-                .map(|_| context.pss_n.share(secrets.view(), &mut rng)[id as usize])
-                .collect();
+        let zero_n_gen = {
+            let small_pool = {
+                let inp = ndarray::concatenate!(
+                    Axis(0),
+                    Array2::zeros((context.l, POOL_SIZE)),
+                    Array2::from_shape_simple_fn((context.n - context.l, POOL_SIZE), || GF::rand(
+                        &mut rng
+                    ))
+                );
+                coeffs_n.dot(&inp).into_shape(POOL_SIZE).unwrap().to_vec()
+            };
+
             let mut iter = small_pool.into_iter().cycle();
             move || iter.next().unwrap()
         };
 
         let bit_gen = {
-            let small_pool: Vec<_> = (0..100)
-                .map(|_| {
-                    let secrets: Vec<_> = (0..context.l)
-                        .map(|_| if rng.gen::<bool>() { GF::ONE } else { GF::ZERO })
-                        .collect();
-                    context.pss.share(ArrayView1::from(&secrets), &mut rng)[id as usize]
-                })
-                .collect();
+            let small_pool = {
+                let inp = ndarray::concatenate!(
+                    Axis(0),
+                    Array2::from_shape_simple_fn((context.l, POOL_SIZE), || if rng.gen::<bool>() {
+                        GF::ONE
+                    } else {
+                        GF::ZERO
+                    }),
+                    Array2::from_shape_simple_fn((context.t, POOL_SIZE), || GF::rand(&mut rng))
+                );
+                coeffs.dot(&inp).into_shape(POOL_SIZE).unwrap().to_vec()
+            };
+
             let mut iter = small_pool.into_iter().cycle();
             move || iter.next().unwrap()
         };
 
-        let counts = PreProcCount::new(circ, context);
-
         Self {
             masks: Array1::from_shape_simple_fn(counts.masks, bit_gen),
             keys: Array3::from_shape_simple_fn(counts.keys, &mut rand_gen),
-            randoms: VecDeque::from_iter(
-                std::iter::repeat_with(&mut rand_gen).take(counts.randoms),
-            ),
-            zeros: VecDeque::from_iter(std::iter::repeat_with(&mut zero_n_gen).take(counts.zeros)),
-            errors: VecDeque::from_iter(std::iter::repeat_with(&mut rand_gen).take(counts.errors)),
+            randoms: std::iter::repeat_with(&mut rand_gen)
+                .take(counts.randoms)
+                .collect(),
+            zeros: std::iter::repeat_with(zero_n_gen)
+                .take(counts.zeros)
+                .collect(),
+            errors: std::iter::repeat_with(&mut rand_gen)
+                .take(counts.errors)
+                .collect(),
         }
     }
 }

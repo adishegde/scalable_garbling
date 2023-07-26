@@ -179,8 +179,7 @@ pub async fn sync(proto_id: ProtocolID, net: &Network, num_parties: usize) {
         proto_id: proto_id.clone(),
         to: Recipient::All,
         data,
-    })
-    .await;
+    });
 
     message_from_each_party(proto_id, net, num_parties).await;
 }
