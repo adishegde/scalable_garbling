@@ -65,8 +65,6 @@ struct PreProc {
 async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: PreProc) {
     let n: u32 = ipaddrs.len().try_into().unwrap();
 
-    println!("--- Party {} ---", opts.id);
-
     GF::<W>::init().unwrap();
 
     let defpos: Vec<GF<W>> = sharing::PackedSharing::default_pos(n, opts.packing_param);
@@ -106,6 +104,8 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: PreProc) {
 
     let bench_proto = b"benchmark communication protocol".to_vec();
     let mut bench_data = json::JsonValue::new_array();
+
+    println!("--- Party {} ---", opts.id);
 
     let (stats, net) = network::setup_tcp_network(opts.id, &ipaddrs).await;
     println!("Connected to network.");

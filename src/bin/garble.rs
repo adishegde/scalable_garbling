@@ -62,8 +62,6 @@ struct Garble {
 async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
     let n: u32 = ipaddrs.len().try_into().unwrap();
 
-    println!("--- Party {} ---", opts.id);
-
     GF::<W>::init().unwrap();
 
     let defpos: Vec<GF<W>> = sharing::PackedSharing::default_pos(n, opts.packing_param);
@@ -88,7 +86,7 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
 
     let desc = preproc::PreProc::describe(&circ, &mpcctx);
 
-    let bench_proto = b"benchmark communication protocol".to_vec();
+    let bench_proto = b"garble_benchmark".to_vec();
     let mut bench_data = json::JsonValue::new_object();
 
     let context = {
@@ -98,16 +96,19 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
         bench_data["onetime_comp"] = comp_time.into();
         Arc::new(context)
     };
-    println!();
-    println!("Completed onetime circuit dependent computation.");
-    println!("Time: {} ms", bench_data["onetime_comp"]);
-    std::io::stdout().flush().unwrap();
 
-    bench_data["garbling"] = json::JsonValue::new_array();
+    println!("--- Party {} ---", opts.id);
+
+    println!(
+        "Onetime circuit dependent computation: {} ms",
+        bench_data["onetime_comp"]
+    );
 
     let (stats, net) = network::setup_tcp_network(opts.id, &ipaddrs).await;
     println!("Connected to network.");
     std::io::stdout().flush().unwrap();
+
+    bench_data["garbling"] = json::JsonValue::new_array();
 
     for i in 0..opts.reps {
         let preproc = preproc::PreProc::dummy(200 + i as u64, desc, &mpcctx);
