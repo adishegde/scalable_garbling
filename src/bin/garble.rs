@@ -7,7 +7,6 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 
 const W: u8 = 18;
 
@@ -96,18 +95,9 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
     let mut bench_data = json::JsonValue::new_object();
 
     let context = {
-        let start = Instant::now();
         let context = garble::GarbleContext::new(circ, mpcctx.clone());
-        let comp_time: u64 = start.elapsed().as_millis().try_into().unwrap();
-        bench_data["onetime_comp"] = comp_time.into();
         Arc::new(context)
     };
-
-    println!(
-        "Onetime circuit dependent computation: {} ms",
-        bench_data["onetime_comp"]
-    );
-    std::io::stdout().flush().unwrap();
 
     bench_data["garbling"] = json::JsonValue::new_array();
 

@@ -13,7 +13,6 @@ use ndarray::{
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha12Rng;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -796,122 +795,25 @@ struct LPNMatrix<const W: u8> {
 
 impl<const W: u8> LPNMatrix<W> {
     fn new(circ: &PackedCircuit, context: &MPCContext<W>) -> Self {
-        let (nonces, lookup) = Self::compute_lookup(circ, context);
+        let mats = {
+            let mut rng = ChaCha12Rng::seed_from_u64(200);
 
-        let const_coeffs = {
-            let defpos = PackedSharing::default_pos(
-                context.n.try_into().unwrap(),
-                context.l.try_into().unwrap(),
-            );
-            let mypos =
-                PackedSharing::share_pos(context.n.try_into().unwrap())[context.id as usize];
+            let mat = Array3::from_shape_simple_fn(
+                (4, context.lpn_mssg_len, context.lpn_key_len),
+                || GF::rand(&mut rng),
+            )
+            .to_shared();
 
-            math::lagrange_coeffs(&defpos, &[mypos]).remove_axis(Axis(0))
+            vec![mat]
         };
 
-        let mats = nonces
-            .par_iter()
-            .map(|n| {
-                // Generate LPN matrix and then encode it to the the party's evaluation point to
-                // ensure correctness of multiplication when encrypting.
-                let mut rng = ChaCha12Rng::from_seed(*n);
-
-                let rgen = || {
-                    let row = Array1::from_shape_simple_fn(context.l, || GF::rand(&mut rng));
-                    const_coeffs.dot(&row)
-                };
-
-                Array3::from_shape_simple_fn((4, context.lpn_mssg_len, context.lpn_key_len), rgen)
-                    .to_shared()
-            })
-            .collect();
-
-        Self { mats, lookup }
+        Self {
+            mats,
+            lookup: vec![0; circ.gates().len()],
+        }
     }
 
     fn get(&self, gid: usize) -> ArcArray<PackedShare<W>, Ix3> {
         self.mats[self.lookup[gid]].clone()
-    }
-
-    fn compute_lookup(
-        circ: &PackedCircuit,
-        context: &MPCContext<W>,
-    ) -> (Vec<[u8; 32]>, Vec<usize>) {
-        let mut counts = HashMap::new();
-        let mut nonce_lookup = HashMap::new();
-        let mut gid_lookup = vec![0; circ.gates().len()];
-
-        let mut nonce_idx = 0;
-        for (gid, g) in circ.gates().iter().enumerate() {
-            let nonce = match g {
-                PackedGate::And(ginf) => {
-                    Self::update_counts(ginf, &mut counts);
-                    Self::hash_inp_wires(ginf, &counts, context.l)
-                }
-                PackedGate::Xor(ginf) => {
-                    Self::update_counts(ginf, &mut counts);
-                    Self::hash_inp_wires(ginf, &counts, context.l)
-                }
-                PackedGate::Inv(ginf) => {
-                    Self::update_counts(ginf, &mut counts);
-                    Self::hash_inp_wires(ginf, &counts, context.l)
-                }
-            };
-
-            gid_lookup[gid] = *nonce_lookup.entry(nonce).or_insert(nonce_idx);
-            nonce_idx = std::cmp::max(nonce_idx, gid_lookup[gid] + 1);
-        }
-
-        let nonces = {
-            let mut nonces = vec![[0; 32]; nonce_lookup.len()];
-            for (n, i) in nonce_lookup {
-                nonces[i] = n;
-            }
-
-            nonces
-        };
-
-        (nonces, gid_lookup)
-    }
-
-    fn update_counts<const N: usize>(
-        ginf: &PackedGateInfo<N>,
-        counts: &mut HashMap<(usize, u32), usize>,
-    ) {
-        for i in 0..N {
-            for w in ginf.inp[i].iter().cloned().enumerate() {
-                *counts.entry(w).or_insert(0) += 1;
-            }
-        }
-    }
-
-    fn hash_inp_wires<const N: usize>(
-        ginf: &PackedGateInfo<N>,
-        counts: &HashMap<(usize, u32), usize>,
-        packing_param: usize,
-    ) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-
-        // Assuming each gate in the circuit has at most 2 inputs.
-        for i in 0..2 {
-            let wires = if i < N {
-                ginf.inp[i].clone()
-            } else {
-                Vec::new()
-            };
-
-            let inp: Vec<_> = wires
-                .into_iter()
-                .enumerate()
-                .map(|w| counts.get(&w).unwrap() - 1)
-                .chain(std::iter::repeat(0))
-                .take(packing_param)
-                .flat_map(|v: usize| v.to_be_bytes())
-                .collect();
-
-            hasher.update(&inp);
-        }
-
-        hasher.finalize().into()
     }
 }
