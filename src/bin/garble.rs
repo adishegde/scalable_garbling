@@ -60,6 +60,12 @@ struct Garble {
 }
 
 async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
+    println!("--- Party {} ---", opts.id);
+
+    let (stats, net) = network::setup_tcp_network(opts.id, &ipaddrs).await;
+    println!("Connected to network.");
+    std::io::stdout().flush().unwrap();
+
     let n: u32 = ipaddrs.len().try_into().unwrap();
 
     GF::<W>::init().unwrap();
@@ -97,15 +103,10 @@ async fn benchmark(circ: PackedCircuit, ipaddrs: Vec<String>, opts: Garble) {
         Arc::new(context)
     };
 
-    println!("--- Party {} ---", opts.id);
-
     println!(
         "Onetime circuit dependent computation: {} ms",
         bench_data["onetime_comp"]
     );
-
-    let (stats, net) = network::setup_tcp_network(opts.id, &ipaddrs).await;
-    println!("Connected to network.");
     std::io::stdout().flush().unwrap();
 
     bench_data["garbling"] = json::JsonValue::new_array();
