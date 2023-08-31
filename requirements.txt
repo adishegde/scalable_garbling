@@ -1,0 +1,8 @@
+galois==0.3.5
+llvmlite==0.40.1
+numba==0.57.1
+numpy==1.24.4
+pip==21.2.4
+scipy==1.11.2
+setuptools==58.1.0
+typing_extensions==4.7.1

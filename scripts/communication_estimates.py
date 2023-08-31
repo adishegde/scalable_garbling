@@ -182,12 +182,11 @@ class ProtoCtr:
 
 
 def fmt_size(num, suffix="B"):
-    return f"{(num / 1e6):.3f} MB"
-    # for unit in ["", "K", "M", "G", "T", "P", "E", "Z"]:
-    #     if abs(num) < 1000.0:
-    #         return f"{num:.3f} {unit}{suffix}"
-    #     num /= 1000.0
-    # return f"{num:.1f} Y{suffix}"
+    for unit in ["", "K", "M", "G", "T", "P", "E", "Z"]:
+        if abs(num) < 1000.0:
+            return f"{num:.3f} {unit}{suffix}"
+        num /= 1000.0
+    return f"{num:.1f} Y{suffix}"
 
 
 def get_print_stat(n):
@@ -197,7 +196,7 @@ def get_print_stat(n):
     return print_stat
 
 
-def ec23(params, num_inp, num_and, num_xor, print_stat):
+def malicious_protocol(params, num_inp, num_and, num_xor, print_stat):
     get_blocks = lambda x: int(math.ceil(x / params.l))
     num_and_blocks = get_blocks(num_and)
     num_xor_blocks = get_blocks(num_xor)
@@ -208,7 +207,7 @@ def ec23(params, num_inp, num_and, num_xor, print_stat):
     total = 0
     preproc = {}
 
-    print("--- Circuit Dependent Cost ---")
+    print("--- Garbling phase ---")
 
     # Preprocessing
     comm = ctr.mackeygen(params.lenmac)
@@ -254,7 +253,7 @@ def ec23(params, num_inp, num_and, num_xor, print_stat):
 
     print_stat("Total", total)
 
-    print("\n--- Circuit Independent Preprocessing ---")
+    print("\n--- Preprocessing phase ---")
     total = 0
 
     for k, v in preproc.items():
@@ -268,7 +267,7 @@ def ec23(params, num_inp, num_and, num_xor, print_stat):
     print_stat("Total", total)
 
 
-def ec23semhon(params, num_inp, num_and, num_xor, print_stat):
+def semihon_protocol(params, num_inp, num_and, num_xor, print_stat):
     get_blocks = lambda x: int(math.ceil(x / params.l))
     num_and_blocks = get_blocks(num_and)
     num_xor_blocks = get_blocks(num_xor)
@@ -279,7 +278,7 @@ def ec23semhon(params, num_inp, num_and, num_xor, print_stat):
     total = 0
     preproc = {}
 
-    print("--- Circuit Dependent Cost ---")
+    print("--- Garbling Phase ---")
 
     # Preprocessing
     comm = ctr.rand(num_wire_blocks * 2 * params.lpn_key_len)
@@ -308,7 +307,7 @@ def ec23semhon(params, num_inp, num_and, num_xor, print_stat):
 
     print_stat("Total", total)
 
-    print("\n--- Circuit Independent Preprocessing ---")
+    print("\n--- Preprocessing Phase ---")
     total = 0
 
     for k, v in preproc.items():
@@ -430,6 +429,6 @@ if __name__ == "__main__":
 
     print_stat = get_print_stat(args.num)
     if args.semi_honest:
-        ec23semhon(params, args.num_inp, args.num_and, args.num_xor, print_stat)
+        semihon_protocol(params, args.num_inp, args.num_and, args.num_xor, print_stat)
     else:
-        ec23(params, args.num_inp, args.num_and, args.num_xor, print_stat)
+        malicious_protocol(params, args.num_inp, args.num_and, args.num_xor, print_stat)

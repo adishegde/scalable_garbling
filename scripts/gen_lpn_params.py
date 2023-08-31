@@ -74,7 +74,6 @@ def find_lpn_params(tau, sec, error, q, low=None, high=None):
         return (low, find_k(low, tau, sec, error, q))
 
     N = (low + high) // 2
-    print("Try:", N)
     k = find_k(N, tau, sec, error, q)
 
     if k == -1:

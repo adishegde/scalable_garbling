@@ -267,7 +267,7 @@ def get_print_stat_time(threads, tadd, tmul):
     return print_stat_time
 
 
-def ec23(params, num_inp, num_and, num_xor, print_stat):
+def malicious_protocol(params, num_inp, num_and, num_xor, print_stat):
     get_blocks = lambda x: int(math.ceil(x / params.l))
     num_and_blocks = get_blocks(num_and)
     num_xor_blocks = get_blocks(num_xor)
@@ -278,7 +278,7 @@ def ec23(params, num_inp, num_and, num_xor, print_stat):
     total = 0
     preproc = {}
 
-    print("--- Circuit Dependent Cost ---")
+    print("--- Garbling phase ---")
 
     # Preprocessing
     comp = ctr.mackeygen(params.lenmac)
@@ -337,7 +337,7 @@ def ec23(params, num_inp, num_and, num_xor, print_stat):
 
     print_stat("Total", total)
 
-    print("\n--- Circuit Independent Preprocessing ---")
+    print("\n--- Preprocessing phase ---")
     total = 0
 
     for k, v in preproc.items():
@@ -351,7 +351,7 @@ def ec23(params, num_inp, num_and, num_xor, print_stat):
     print_stat("Total", total)
 
 
-def ec23semhon(params, num_inp, num_and, num_xor, print_stat):
+def semihon_protocol(params, num_inp, num_and, num_xor, print_stat):
     get_blocks = lambda x: int(math.ceil(x / params.l))
     num_and_blocks = get_blocks(num_and)
     num_xor_blocks = get_blocks(num_xor)
@@ -362,7 +362,7 @@ def ec23semhon(params, num_inp, num_and, num_xor, print_stat):
     total = 0
     preproc = {}
 
-    print("--- Circuit Dependent Cost ---")
+    print("--- Garbling phase ---")
 
     # Preprocessing
     comp = ctr.rand(num_wire_blocks * 2 * params.lpn_key_len)
@@ -407,7 +407,7 @@ def ec23semhon(params, num_inp, num_and, num_xor, print_stat):
 
     print_stat("Total", total)
 
-    print("\n--- Circuit Independent Preprocessing ---")
+    print("\n--- Preprocessing phase ---")
     total = 0
 
     for k, v in preproc.items():
@@ -529,6 +529,6 @@ if __name__ == "__main__":
 
     print_stat = get_print_stat_time(args.threads, args.time_add, args.time_mult)
     if args.semi_honest:
-        ec23semhon(params, args.num_inp, args.num_and, args.num_xor, print_stat)
+        semihon_protocol(params, args.num_inp, args.num_and, args.num_xor, print_stat)
     else:
-        ec23(params, args.num_inp, args.num_and, args.num_xor, print_stat)
+        malicious_protocol(params, args.num_inp, args.num_and, args.num_xor, print_stat)
