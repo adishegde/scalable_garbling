@@ -18,7 +18,7 @@ The repository consists of the following:
 To install the required python packages run: `pip install -r requirements.txt`.
 
 ## LPN Parameters
-LPN parameters can be computed using the [`gen_lpn_params.py`](https://github.com/adishegde/scalable_garbling/blob/main/scripts/gen_lpn_params.py) script.
+LPN parameters can be computed using the [`gen_lpn_params.py`](https://github.com/adishegde/scalable_garbling/blob/benchmarks/scripts/gen_lpn_params.py) script.
 
 Usage:
 ```sh
@@ -39,7 +39,7 @@ The repository supports computing the following benchmarks for the semi-honest s
 - Size of the pre-processing material
 
 All benchmarks can be run independent of each other.
-The only caveat is that benchmarking the pre-processing phase requires generating the appropriate binary super-invertible matrix which can be done using the [`gen_binary_supmat.py`](https://github.com/adishegde/scalable_garbling/blob/main/scripts/gen_binary_supmat.py) script.
+The only caveat is that benchmarking the pre-processing phase requires generating the appropriate binary super-invertible matrix which can be done using the [`gen_binary_supmat.py`](https://github.com/adishegde/scalable_garbling/blob/benchmarks/scripts/gen_binary_supmat.py) script.
 The repository already includes binary super-invertible matrices for parameters used in the evaluation section of the paper.
 
 For ease of usage, the repository also includes [Briston Fashion MPC circuit descriptions](https://homes.esat.kuleuven.be/~nsmart/MPC/) of some common circuits in `data/circ`.
@@ -124,13 +124,8 @@ python scripts/gen_binary_supmat.py 16 3 --output_path ./data/binsup_mat
     --num-parties 16 --threshold 5 --packing-param 3
 ```
 
-**NOTE:** Generating and encoding the public LPN matrix can significantly delay the time to start running the benchmarks for the *garbling* phase.
-This is a one-time computation and does not affect the runtime and communication cost of the garbling phase.
-For the purpose of benchmarking, the `benchmarks` branch avoids this one-time overhead by re-using the same LPN matrix while keeping the garbling phase protocol identical.
-We recommend either serializing and storing the encoding of the LPN matrix or using the `benchmarks` branch when benchmarking over different sets of parameters.
-
 ## Maliciously Secure Protocol
-The communication cost and the computation cost of the maliciously secure garbling protocol can be estimated using the [`communication_estimates.py`](https://github.com/adishegde/scalable_garbling/blob/main/scripts/communication_estimates.py) and [`computation_estimates.py`](https://github.com/adishegde/scalable_garbling/blob/main/scripts/computation_estimates.py) scripts respectively.
+The communication cost and the computation cost of the maliciously secure garbling protocol can be estimated using the [`communication_estimates.py`](https://github.com/adishegde/scalable_garbling/blob/benchmarks/scripts/communication_estimates.py) and [`computation_estimates.py`](https://github.com/adishegde/scalable_garbling/blob/benchmarks/scripts/computation_estimates.py) scripts respectively.
 The computation estimates rely upon the time required to carry out individual field operations.
 These timings can be obtained by running `cargo bench` (which in turn uses [criterion](https://docs.rs/criterion/latest/criterion/)) as shown below, which benchmarks the performance of the [Fast Galois Field Arithmetic Library](http://web.eecs.utk.edu/~jplank/plank/papers/CS-07-593/), also used in the implementation of the semi-honest secure protocol.
 
